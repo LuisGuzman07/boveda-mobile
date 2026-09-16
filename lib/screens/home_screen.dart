@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-import '../config/app_config.dart';
-import '../services/api_service.dart';
+import 'package:flutter/services.dart';
+import '../models/authenticator_account.dart';
+import '../services/account_storage_service.dart';
+import '../services/totp_service.dart';
+import 'add_account_screen.dart';
+import 'qr_scanner_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -10,161 +15,244 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  bool _isLoading = false;
-  bool _backendOk = false;
-  bool _dbOk = false;
-  String _backendMessage = 'Sin verificar';
-  String _dbMessage = 'Sin verificar';
+  List<AuthenticatorAccount> _accounts = [];
+  bool _isLoading = true;
+  Timer? _timer;
+  int _remainingSeconds = 30;
+  double _progress = 1.0;
 
   @override
   void initState() {
     super.initState();
-    _checkStatus();
+    _loadAccounts();
+    _startTimer();
   }
 
-  Future<void> _checkStatus() async {
-    setState(() {
-      _isLoading = true;
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer() {
+    _updateProgress();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _updateProgress();
+        });
+      }
     });
+  }
 
-    // 1. Backend Health Check
-    try {
-      final backendRes = await ApiService.checkHealth();
-      if (backendRes['status'] == 'ok') {
-        _backendOk = true;
-        _backendMessage = 'Backend conectado correctamente';
-      } else {
-        _backendOk = false;
-        _backendMessage = 'Respuesta inesperada del backend';
-      }
-    } catch (e) {
-      _backendOk = false;
-      _backendMessage = 'No se pudo conectar con el backend ($e)';
-    }
+  void _updateProgress() {
+    _remainingSeconds = TotpService.getRemainingSeconds();
+    _progress = TotpService.getProgress();
+  }
 
-    // 2. Database Health Check
-    try {
-      final dbRes = await ApiService.checkDatabaseHealth();
-      if (dbRes['status'] == 'ok' && dbRes['database'] == 'connected') {
-        _dbOk = true;
-        _dbMessage = 'Base de datos conectada (PostgreSQL OK)';
-      } else {
-        _dbOk = false;
-        _dbMessage = 'Base de datos desconectada';
-      }
-    } catch (e) {
-      _dbOk = false;
-      _dbMessage = 'Error en conexión a base de datos';
-    }
-
+  Future<void> _loadAccounts() async {
+    final accounts = await AccountStorageService.getAccounts();
     if (mounted) {
       setState(() {
+        _accounts = accounts;
         _isLoading = false;
       });
     }
   }
 
+  void _copyToClipboard(String code, String accountName) {
+    Clipboard.setData(ClipboardData(text: code));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Código copiado: $code ($accountName)'),
+        duration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFF2563EB),
+      ),
+    );
+  }
+
+  Future<void> _scanQrDirectly() async {
+    final result = await Navigator.push<Map<String, String>>(
+      context,
+      MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+    );
+
+    if (result != null && mounted) {
+      final account = AuthenticatorAccount(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        issuer: 'Bóveda Híbrida',
+        accountName: result['accountName'] ?? 'Bóveda',
+        secret: result['secret'] ?? '',
+        createdAt: DateTime.now(),
+      );
+      await AccountStorageService.saveAccount(account);
+      await _loadAccounts();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Cuenta "${account.accountName}" vinculada exitosamente'),
+            backgroundColor: const Color(0xFF10B981),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteAccount(AuthenticatorAccount account) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text('Eliminar Cuenta', style: TextStyle(color: Colors.white)),
+        content: Text(
+          '¿Estás seguro de desvincular "${account.accountName}" de este autenticador?',
+          style: const TextStyle(color: Color(0xFFCBD5E1)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFEF4444),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await AccountStorageService.deleteAccount(account.id);
+      await _loadAccounts();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    Color timerColor;
+    if (_remainingSeconds > 10) {
+      timerColor = const Color(0xFF10B981); // Verde
+    } else if (_remainingSeconds > 5) {
+      timerColor = const Color(0xFFF59E0B); // Ámbar
+    } else {
+      timerColor = const Color(0xFFEF4444); // Rojo
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
       appBar: AppBar(
-        title: const Text(
-          'Bóveda Híbrida',
-          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+        title: Row(
+          children: [
+            const Icon(Icons.shield_rounded, color: Color(0xFF3B82F6), size: 26),
+            const SizedBox(width: 8),
+            const Text(
+              'Bóveda Authenticator',
+              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 18),
+            ),
+          ],
         ),
         backgroundColor: const Color(0xFF1E293B),
         elevation: 0,
-        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF60A5FA)),
+            tooltip: 'Escanear QR',
+            onPressed: _scanQrDirectly,
+          ),
+          // Indicador circular de tiempo en AppBar
+          Container(
+            margin: const EdgeInsets.only(right: 16),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: CircularProgressIndicator(
+                    value: _progress,
+                    strokeWidth: 3,
+                    backgroundColor: const Color(0xFF334155),
+                    valueColor: AlwaysStoppedAnimation<Color>(timerColor),
+                  ),
+                ),
+                Text(
+                  '$_remainingSeconds',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: timerColor,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20.0),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _accounts.isEmpty
+              ? _buildEmptyState()
+              : _buildAccountsList(timerColor),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          final result = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(builder: (_) => const AddAccountScreen()),
+          );
+          if (result == true) {
+            await _loadAccounts();
+          }
+        },
+        backgroundColor: const Color(0xFF2563EB),
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Vincular Cuenta', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Header card
             Container(
-              padding: const EdgeInsets.all(16.0),
+              width: 80,
+              height: 80,
               decoration: BoxDecoration(
                 color: const Color(0xFF1E293B),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF334155)),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF334155), width: 1.5),
               ),
-              child: Column(
-                children: [
-                  const Icon(
-                    Icons.security_rounded,
-                    size: 48,
-                    color: Color(0xFF3B82F6),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Estado de Conexión del Sistema',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'URL Base: ${AppConfig.baseUrl}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF94A3B8),
-                      fontFamily: 'monospace',
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
+              child: const Icon(Icons.lock_clock_rounded, size: 40, color: Color(0xFF3B82F6)),
             ),
             const SizedBox(height: 20),
-
-            // Backend Status Card
-            _buildStatusCard(
-              title: 'FastAPI Backend',
-              subtitle: _backendMessage,
-              isOk: _backendOk,
-              isLoading: _isLoading,
-              icon: Icons.api_rounded,
+            const Text(
+              'No hay cuentas vinculadas',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
             ),
-            const SizedBox(height: 14),
-
-            // Database Status Card
-            _buildStatusCard(
-              title: 'PostgreSQL Database',
-              subtitle: _dbMessage,
-              isOk: _dbOk,
-              isLoading: _isLoading,
-              icon: Icons.storage_rounded,
+            const SizedBox(height: 8),
+            Text(
+              'Escanea el código QR en la web de Bóveda Híbrida para vincular tu cuenta al instante.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey[400], fontSize: 13, height: 1.5),
             ),
-            const SizedBox(height: 28),
-
-            // Refresh button
+            const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: _isLoading ? null : _checkStatus,
-              icon: _isLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Icon(Icons.refresh_rounded),
-              label: Text(
-                _isLoading ? 'Comprobando...' : 'Reintentar Conexión',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-              ),
+              onPressed: _scanQrDirectly,
+              icon: const Icon(Icons.qr_code_scanner_rounded),
+              label: const Text('Escanear Código QR'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF2563EB),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
             ),
           ],
@@ -173,95 +261,97 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildStatusCard({
-    required String title,
-    required String subtitle,
-    required bool isOk,
-    required bool isLoading,
-    required IconData icon,
-  }) {
-    Color cardBorder;
-    Color cardBg;
-    Color statusColor;
-    String statusText;
+  Widget _buildAccountsList(Color timerColor) {
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
+      itemCount: _accounts.length,
+      itemBuilder: (context, index) {
+        final account = _accounts[index];
+        final rawCode = TotpService.generateCode(account.secret);
+        final formattedCode = '${rawCode.substring(0, 3)} ${rawCode.substring(3)}';
 
-    if (isLoading) {
-      cardBorder = const Color(0xFFF59E0B).withOpacity(0.4);
-      cardBg = const Color(0xFFF59E0B).withOpacity(0.1);
-      statusColor = const Color(0xFFF59E0B);
-      statusText = 'Verificando';
-    } else if (isOk) {
-      cardBorder = const Color(0xFF10B981).withOpacity(0.4);
-      cardBg = const Color(0xFF10B981).withOpacity(0.1);
-      statusColor = const Color(0xFF10B981);
-      statusText = 'Online';
-    } else {
-      cardBorder = const Color(0xFFEF4444).withOpacity(0.4);
-      cardBg = const Color(0xFFEF4444).withOpacity(0.1);
-      statusColor = const Color(0xFFEF4444);
-      statusText = 'Desconectado';
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(16.0),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cardBorder),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(icon, size: 36, color: statusColor),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E293B),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF334155)),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => _copyToClipboard(rawCode, account.accountName),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const Spacer(),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: statusColor.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        statusText,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: statusColor,
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF3B82F6).withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                account.issuer,
+                                style: const TextStyle(
+                                  color: Color(0xFF93C5FD),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline_rounded, color: Colors.grey, size: 20),
+                          onPressed: () => _deleteAccount(account),
+                          tooltip: 'Desvincular',
+                          constraints: const BoxConstraints(),
+                          padding: EdgeInsets.zero,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      account.accountName,
+                      style: TextStyle(color: Colors.grey[300], fontSize: 13),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Text(
+                          formattedCode,
+                          style: TextStyle(
+                            color: timerColor,
+                            fontSize: 32,
+                            fontWeight: FontWeight.w800,
+                            fontFamily: 'monospace',
+                            letterSpacing: 2,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.copy_rounded, color: Color(0xFF60A5FA), size: 22),
+                          onPressed: () => _copyToClipboard(rawCode, account.accountName),
+                          tooltip: 'Copiar código',
+                        ),
+                      ],
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFFCBD5E1),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
