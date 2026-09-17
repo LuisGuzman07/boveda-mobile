@@ -6,6 +6,7 @@ import '../services/account_storage_service.dart';
 import '../services/totp_service.dart';
 import 'add_account_screen.dart';
 import 'qr_scanner_screen.dart';
+import 'vault_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -158,6 +159,11 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: const Color(0xFF1E293B),
         elevation: 0,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.folder_special),
+            tooltip: 'Bóvedas cifradas',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const VaultScreen())),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF60A5FA)),
             tooltip: 'Escanear QR',
