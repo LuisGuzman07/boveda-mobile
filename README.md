@@ -8,7 +8,7 @@ Aplicación móvil para el sistema **Bóveda híbrida de archivos cifrados para 
 
 - [Flutter SDK](https://flutter.dev/docs/get-started/install) (versión 3.24+ / 3.47+)
 - [Android Studio](https://developer.android.com/studio) o [VS Code](https://code.visualstudio.com/) con plugins de Flutter y Dart.
-- Backend FastAPI levantado y corriendo (`http://localhost:8000`).
+- Backend FastAPI levantado con HTTPS para dispositivos físicos.
 
 ---
 
@@ -25,9 +25,18 @@ flutter pub get
 La URL base del backend se encuentra centralizada en:
 `lib/config/app_config.dart`
 
-- **Navegador Web / Windows Desktop:** `http://localhost:8000/api/v1`
-- **Emulador Android:** `http://10.0.2.2:8000/api/v1` *(por defecto detectado automáticamente)*
-- **Dispositivo físico vía Wi-Fi:** `http://<IP_LOCAL_DE_TU_PC>:8000/api/v1` (ambos dispositivos en la misma red).
+- **Debug local web / desktop:** `http://localhost:8000/api/v1`
+- **Emulador Android en debug:** `http://10.0.2.2:8000/api/v1`
+- **Dispositivo físico y release:** HTTPS mediante proxy TLS o certificado confiable.
+
+HTTP se rechaza fuera de debug y nunca se permite hacia direcciones LAN. Configura
+`BOVEDA_API_URL` únicamente con una URL HTTPS para un teléfono físico o release.
+
+La firma release se lee desde `android/key.properties`, que permanece fuera de
+versionamiento. Sin esas propiedades, los builds release fallan de forma explícita;
+el build debug continúa disponible. El `applicationId` actual se conserva durante
+esta versión para que las instalaciones existentes puedan migrar sus cuentas TOTP
+desde SharedPreferences a almacenamiento seguro antes de un cambio de identidad.
 
 ---
 

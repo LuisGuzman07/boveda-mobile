@@ -2,6 +2,7 @@ import 'package:boveda_mobile/main.dart';
 import 'package:boveda_mobile/screens/vault_screen.dart';
 import 'package:boveda_mobile/services/vault_api_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -16,6 +17,10 @@ class TrackingVaultApiService extends VaultApiService {
 }
 
 void main() {
+  setUp(() {
+    FlutterSecureStorage.setMockInitialValues({});
+  });
+
   testWidgets('CU06 opens from home and validates required credentials',
       (tester) async {
     SharedPreferences.setMockInitialValues({});

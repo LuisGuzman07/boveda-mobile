@@ -1,3 +1,14 @@
+import java.io.FileInputStream
+import java.util.Properties
+
+val releasePropertiesFile = rootProject.file("key.properties")
+val releaseProperties = Properties()
+if (releasePropertiesFile.exists()) {
+    FileInputStream(releasePropertiesFile).use(releaseProperties::load)
+}
+val hasReleaseSigning = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .all { !releaseProperties.getProperty(it).isNullOrBlank() }
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -16,7 +27,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        // Preserved for the one-time secure-storage migration of existing installs.
+        // Change it only after the legacy migration retirement plan is completed.
         applicationId = "com.example.boveda_mobile"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
@@ -30,13 +42,35 @@ android {
         versionName = flutter.versionName
     }
 
-    buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseProperties.getProperty("storeFile"))
+                storePassword = releaseProperties.getProperty("storePassword")
+                keyAlias = releaseProperties.getProperty("keyAlias")
+                keyPassword = releaseProperties.getProperty("keyPassword")
+            }
         }
     }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+}
+
+if (!hasReleaseSigning) {
+    tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }
+        .configureEach {
+            doFirst {
+                throw GradleException(
+                    "Release signing is not configured. Provide android/key.properties outside version control."
+                )
+            }
+        }
 }
 
 kotlin {

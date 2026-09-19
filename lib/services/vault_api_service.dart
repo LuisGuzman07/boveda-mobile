@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart' as hashes;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import '../config/app_config.dart';
 import 'vault_crypto_service.dart';
 
 class VaultApiException implements Exception {
@@ -27,12 +28,11 @@ class VaultApiService {
       : storage = storage ??
             const FlutterSecureStorage(
                 aOptions: AndroidOptions(encryptedSharedPreferences: true)),
-        baseUrl = baseUrl ??
-            (configuredUrl.isNotEmpty
-                ? configuredUrl
-                : (!kIsWeb && Platform.isAndroid
-                    ? 'http://10.0.2.2:8001/api/v1'
-                    : 'http://localhost:8001/api/v1'));
+        baseUrl = AppConfig.resolveApiUrl(
+          configuredUrl:
+              baseUrl ?? (configuredUrl.isNotEmpty ? configuredUrl : null),
+          port: 8001,
+        );
 
   bool get authenticated => _token != null;
   String get deviceId => _deviceId!;
