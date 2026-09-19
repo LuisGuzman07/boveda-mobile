@@ -1,16 +1,20 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/vault_api_service.dart';
 import '../services/vault_crypto_service.dart';
 
 class VaultScreen extends StatefulWidget {
-  const VaultScreen({super.key});
+  const VaultScreen({super.key, this.api});
+
+  final VaultApiService? api;
+
   @override
   State<VaultScreen> createState() => _VaultScreenState();
 }
 
 class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
-  final _api = VaultApiService();
+  late final VaultApiService _api;
   final _crypto = VaultCryptoService();
   final _email = TextEditingController();
   final _accountPassword = TextEditingController();
@@ -28,12 +32,15 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _api = widget.api ?? VaultApiService();
     WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _clearPasswords();
     }
@@ -49,6 +56,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _clearPasswords();
     _api.logout();
     for (final controller in [
       _email,
@@ -86,6 +94,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         if (_email.text.trim().isEmpty ||
             _accountPassword.text.isEmpty ||
             !RegExp(r'^\d{6}$').hasMatch(_totp.text.trim())) {
+          _totp.clear();
           throw VaultApiException(
               'Completa correo, contraseña y código TOTP de seis dígitos.');
         }
@@ -212,6 +221,24 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               decoration: InputDecoration(
                   labelText: label, border: const OutlineInputBorder())));
 
+  Widget _totpField() => Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextField(
+          controller: _totp,
+          obscureText: true,
+          enabled: !_busy,
+          keyboardType: TextInputType.number,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(6),
+          ],
+          maxLength: 6,
+          maxLengthEnforcement: MaxLengthEnforcement.enforced,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(
+              labelText: 'Código TOTP', border: OutlineInputBorder())));
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -244,7 +271,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             const SizedBox(height: 16),
             _field(_email, 'Correo'),
             _field(_accountPassword, 'Contraseña de la cuenta', secret: true),
-            _field(_totp, 'Código TOTP', maxLength: 6),
+            _totpField(),
             FilledButton(
                 onPressed: _busy ? null : _login,
                 child: const Text('Ingresar')),
