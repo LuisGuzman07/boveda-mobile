@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/authenticator_account.dart';
 import '../services/account_storage_service.dart';
+import '../services/app_lock_service.dart';
+import '../widgets/app_lock_gate.dart';
 import 'qr_scanner_screen.dart';
 
 class AddAccountScreen extends StatefulWidget {
@@ -23,29 +25,69 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
   late final TextEditingController _secretController;
   final _issuerController = TextEditingController(text: 'Bóveda Híbrida');
   bool _isLoading = false;
+  AppLockService? _lockService;
+  int _operation = 0;
 
   @override
   void initState() {
     super.initState();
-    _nameController = TextEditingController(text: widget.initialAccountName ?? '');
+    _nameController =
+        TextEditingController(text: widget.initialAccountName ?? '');
     _secretController = TextEditingController(text: widget.initialSecret ?? '');
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final lockService = AppLockScope.maybeOf(context);
+    if (identical(lockService, _lockService)) {
+      return;
+    }
+    _lockService?.removeListener(_onLockChanged);
+    _lockService = lockService;
+    _lockService?.addListener(_onLockChanged);
+    if (!_canUseSensitiveFeatures) {
+      _operation++;
+      _secretController.clear();
+    }
+  }
+
+  @override
   void dispose() {
+    _lockService?.removeListener(_onLockChanged);
     _nameController.dispose();
     _secretController.dispose();
     _issuerController.dispose();
     super.dispose();
   }
 
+  bool get _canUseSensitiveFeatures =>
+      _lockService == null || _lockService!.allowsSensitiveActions;
+
+  bool _isCurrentOperation(int operation) =>
+      mounted && _canUseSensitiveFeatures && operation == _operation;
+
+  void _onLockChanged() {
+    if (!mounted || _canUseSensitiveFeatures) {
+      return;
+    }
+    _operation++;
+    _secretController.clear();
+    if (mounted) {
+      setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _scanQrCode() async {
+    if (!_canUseSensitiveFeatures || !mounted) {
+      return;
+    }
     final result = await Navigator.push<Map<String, String>>(
       context,
       MaterialPageRoute(builder: (_) => const QrScannerScreen()),
     );
 
-    if (result != null && mounted) {
+    if (result != null && mounted && _canUseSensitiveFeatures) {
       setState(() {
         _nameController.text = result['accountName'] ?? _nameController.text;
         _secretController.text = result['secret'] ?? _secretController.text;
@@ -61,11 +103,16 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
   }
 
   Future<void> _save() async {
+    if (!_canUseSensitiveFeatures || !mounted) {
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
 
+    final operation = ++_operation;
     setState(() => _isLoading = true);
 
-    final cleanSecret = _secretController.text.trim().replaceAll(' ', '').toUpperCase();
+    final cleanSecret =
+        _secretController.text.trim().replaceAll(' ', '').toUpperCase();
     final account = AuthenticatorAccount(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       issuer: _issuerController.text.trim().isEmpty
@@ -76,9 +123,37 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
       createdAt: DateTime.now(),
     );
 
-    await AccountStorageService.saveAccount(account);
+    try {
+      await AccountStorageService.saveAccount(account);
+    } on AccountStorageException catch (error) {
+      if (_isCurrentOperation(operation)) {
+        setState(() => _isLoading = false);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.message)),
+        );
+      }
+      return;
+    } catch (_) {
+      if (_isCurrentOperation(operation)) {
+        setState(() => _isLoading = false);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('No se pudo guardar la cuenta protegida.')),
+        );
+      }
+      return;
+    }
 
-    if (mounted) {
+    if (_isCurrentOperation(operation)) {
+      if (!mounted) {
+        return;
+      }
       Navigator.pop(context, true);
     }
   }
@@ -105,7 +180,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
             children: [
               // Botón principal: Escanear QR
               OutlinedButton.icon(
-                onPressed: _scanQrCode,
+                onPressed: _canUseSensitiveFeatures ? _scanQrCode : null,
                 icon: const Icon(Icons.qr_code_scanner_rounded, size: 24),
                 label: const Text(
                   'Escanear Código QR de la Web',
@@ -116,7 +191,8 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                   side: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   backgroundColor: const Color(0xFF1E293B),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
                 ),
               ),
               const SizedBox(height: 18),
@@ -138,6 +214,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
 
               TextFormField(
                 controller: _nameController,
+                enabled: _canUseSensitiveFeatures && !_isLoading,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
                   labelText: 'Correo o Nombre de Cuenta',
@@ -156,7 +233,8 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+                    borderSide:
+                        const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
                   ),
                 ),
                 validator: (val) {
@@ -169,6 +247,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _secretController,
+                enabled: _canUseSensitiveFeatures && !_isLoading,
                 style: const TextStyle(
                   color: Colors.white,
                   fontFamily: 'monospace',
@@ -180,7 +259,8 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                   labelText: 'Clave Secreta (Base32)',
                   labelStyle: TextStyle(color: Colors.grey[400]),
                   hintText: 'ej. JBSWY3DPEHPK3PXP',
-                  hintStyle: TextStyle(color: Colors.grey[600], letterSpacing: 0),
+                  hintStyle:
+                      TextStyle(color: Colors.grey[600], letterSpacing: 0),
                   filled: true,
                   fillColor: const Color(0xFF1E293B),
                   border: OutlineInputBorder(
@@ -193,7 +273,8 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+                    borderSide:
+                        const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
                   ),
                 ),
                 validator: (val) {
@@ -212,17 +293,20 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
               ),
               const SizedBox(height: 28),
               ElevatedButton.icon(
-                onPressed: _isLoading ? null : _save,
+                onPressed:
+                    _isLoading || !_canUseSensitiveFeatures ? null : _save,
                 icon: const Icon(Icons.check_circle_rounded),
                 label: Text(
                   _isLoading ? 'Guardando...' : 'Guardar y Generar Códigos',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF2563EB),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
                 ),
               ),
             ],

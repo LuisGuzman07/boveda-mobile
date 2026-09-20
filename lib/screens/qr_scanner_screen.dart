@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+
+import '../services/app_lock_service.dart';
+import '../widgets/app_lock_gate.dart';
 
 class QrScannerScreen extends StatefulWidget {
   const QrScannerScreen({super.key});
@@ -13,15 +18,49 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     detectionSpeed: DetectionSpeed.noDuplicates,
   );
   bool _isScanned = false;
+  AppLockService? _lockService;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final lockService = AppLockScope.maybeOf(context);
+    if (identical(lockService, _lockService)) {
+      return;
+    }
+    _lockService?.removeListener(_onLockChanged);
+    _lockService = lockService;
+    _lockService?.addListener(_onLockChanged);
+    if (!_canUseSensitiveFeatures) {
+      _isScanned = true;
+      unawaited(_controller.stop());
+    }
+  }
 
   @override
   void dispose() {
+    _lockService?.removeListener(_onLockChanged);
     _controller.dispose();
     super.dispose();
   }
 
+  bool get _canUseSensitiveFeatures =>
+      _lockService == null || _lockService!.allowsSensitiveActions;
+
+  void _onLockChanged() {
+    if (!mounted) {
+      return;
+    }
+    if (_canUseSensitiveFeatures) {
+      _isScanned = false;
+      unawaited(_controller.start());
+      return;
+    }
+    _isScanned = true;
+    unawaited(_controller.stop());
+  }
+
   void _onDetect(BarcodeCapture capture) {
-    if (_isScanned) return;
+    if (_isScanned || !_canUseSensitiveFeatures || !mounted) return;
     final List<Barcode> barcodes = capture.barcodes;
     for (final barcode in barcodes) {
       final String? rawValue = barcode.rawValue;
@@ -34,6 +73,9 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   }
 
   void _parseAndReturn(String raw) {
+    if (!_canUseSensitiveFeatures || !mounted) {
+      return;
+    }
     String accountName = 'Bóveda';
     String secret = raw.trim();
 
@@ -75,18 +117,23 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Escanear Código QR', style: TextStyle(color: Colors.white, fontSize: 17)),
+        title: const Text('Escanear Código QR',
+            style: TextStyle(color: Colors.white, fontSize: 17)),
         backgroundColor: const Color(0xFF1E293B),
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           IconButton(
             icon: const Icon(Icons.flash_on, color: Colors.white70),
-            onPressed: () => _controller.toggleTorch(),
+            onPressed: _canUseSensitiveFeatures
+                ? () => _controller.toggleTorch()
+                : null,
           ),
           IconButton(
             icon: const Icon(Icons.flip_camera_android, color: Colors.white70),
-            onPressed: () => _controller.switchCamera(),
+            onPressed: _canUseSensitiveFeatures
+                ? () => _controller.switchCamera()
+                : null,
           ),
         ],
       ),
@@ -106,7 +153,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
                 borderRadius: BorderRadius.circular(16),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF3B82F6).withOpacity(0.3),
+                    color: const Color(0xFF3B82F6).withValues(alpha: 0.3),
                     blurRadius: 20,
                     spreadRadius: 2,
                   ),
@@ -121,7 +168,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: const Color(0xFF1E293B).withOpacity(0.9),
+                color: const Color(0xFF1E293B).withValues(alpha: 0.9),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: Colors.white12),
               ),

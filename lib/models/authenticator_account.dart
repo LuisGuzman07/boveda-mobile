@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 class AuthenticatorAccount {
   final String id;
   final String issuer;

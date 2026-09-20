@@ -3,7 +3,8 @@ import 'package:boveda_mobile/services/totp_service.dart';
 
 void main() {
   group('TotpService Tests', () {
-    const testSecret = 'JBSWY3DPEHPK3PXP'; // Base32 for "Hello!\xde\xad\xbe\xef"
+    const testSecret =
+        'JBSWY3DPEHPK3PXP'; // Base32 for "Hello!\xde\xad\xbe\xef"
 
     test('Generates 6-digit numeric string', () {
       final code = TotpService.generateCode(testSecret);

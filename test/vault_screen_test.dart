@@ -1,10 +1,13 @@
 import 'package:boveda_mobile/main.dart';
 import 'package:boveda_mobile/screens/vault_screen.dart';
+import 'package:boveda_mobile/services/app_lock_service.dart';
 import 'package:boveda_mobile/services/vault_api_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'helpers/lock_fakes.dart';
 
 class TrackingVaultApiService extends VaultApiService {
   bool loggedOut = false;
@@ -24,7 +27,14 @@ void main() {
   testWidgets('CU06 opens from home and validates required credentials',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(const BovedaApp());
+    final lock =
+        AppLockService(authenticator: FakeLocalAuthenticationGateway());
+    addTearDown(lock.dispose);
+    await tester.pumpWidget(BovedaApp(
+      lockService: lock,
+      identityService: FakeInstallationIdentityProvider(),
+    ));
+    await tester.tap(find.text('Desbloquear'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Escanear QR'), findsOneWidget);
     await tester.tap(find.byTooltip('Bóvedas cifradas'));

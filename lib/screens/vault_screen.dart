@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/app_lock_service.dart';
 import '../services/vault_api_service.dart';
 import '../services/vault_crypto_service.dart';
+import '../widgets/app_lock_gate.dart';
 
 class VaultScreen extends StatefulWidget {
   const VaultScreen({super.key, this.api});
@@ -28,12 +30,33 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _vaults = [];
   Map<String, dynamic>? _pending;
   String? _retryKey;
+  AppLockService? _lockService;
+  TextEditingController? _reopenPassword;
+  int _operation = 0;
 
   @override
   void initState() {
     super.initState();
     _api = widget.api ?? VaultApiService();
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final lockService = AppLockScope.maybeOf(context);
+    if (identical(lockService, _lockService)) {
+      return;
+    }
+    _lockService?.removeListener(_onLockChanged);
+    _lockService = lockService;
+    if (lockService != null) {
+      _api.attachLockService(lockService);
+      lockService.addListener(_onLockChanged);
+    }
+    if (!_canUseSensitiveFeatures) {
+      _clearSensitiveState(notify: false);
+    }
   }
 
   @override
@@ -46,6 +69,28 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     }
   }
 
+  bool get _canUseSensitiveFeatures =>
+      _lockService == null || _lockService!.allowsSensitiveActions;
+
+  bool _isCurrentOperation(int operation) =>
+      mounted && _canUseSensitiveFeatures && operation == _operation;
+
+  void _ensureCurrentOperation(int operation) {
+    if (!_isCurrentOperation(operation)) {
+      throw VaultApiException(
+        'La aplicación se bloqueó antes de completar la operación.',
+      );
+    }
+  }
+
+  void _onLockChanged() {
+    if (!mounted || _canUseSensitiveFeatures) {
+      return;
+    }
+    _operation++;
+    _clearSensitiveState(notify: true);
+  }
+
   void _clearPasswords() {
     _accountPassword.clear();
     _totp.clear();
@@ -53,10 +98,30 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     _confirmation.clear();
   }
 
+  void _clearSensitiveState({required bool notify}) {
+    _clearPasswords();
+    _reopenPassword?.clear();
+    _email.clear();
+    _name.clear();
+    _description.clear();
+    _api.logout();
+    _vaults = <Map<String, dynamic>>[];
+    _pending = null;
+    _retryKey = null;
+    if (notify && mounted) {
+      setState(() {
+        _busy = false;
+        _error = null;
+      });
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _lockService?.removeListener(_onLockChanged);
     _clearPasswords();
+    _reopenPassword?.clear();
     _api.logout();
     for (final controller in [
       _email,
@@ -72,25 +137,31 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _run(Future<void> Function(int operation) action) async {
+    if (!mounted || !_canUseSensitiveFeatures) {
+      return;
+    }
+    final operation = ++_operation;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await action();
+      await action(operation);
     } catch (error) {
-      if (mounted) {
+      if (_isCurrentOperation(operation)) {
         setState(() => _error = error is VaultApiException
             ? error.message
             : 'No se pudo completar la operación. Verifica la conexión y tus credenciales.');
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (_isCurrentOperation(operation)) {
+        setState(() => _busy = false);
+      }
     }
   }
 
-  Future<void> _login() => _run(() async {
+  Future<void> _login() => _run((operation) async {
         if (_email.text.trim().isEmpty ||
             _accountPassword.text.isEmpty ||
             !RegExp(r'^\d{6}$').hasMatch(_totp.text.trim())) {
@@ -100,19 +171,25 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         }
         try {
           await _api.login(_email.text, _accountPassword.text, _totp.text);
+          _ensureCurrentOperation(operation);
           final pending = await _api.pendingCreation();
+          _ensureCurrentOperation(operation);
+          final vaults = await _api.listVaults();
+          _ensureCurrentOperation(operation);
           _pending = pending == null
               ? null
               : Map<String, dynamic>.from(pending['body'] as Map);
           _retryKey = pending?['retry_key'] as String?;
-          _vaults = await _api.listVaults();
+          _vaults = vaults;
         } finally {
-          _accountPassword.clear();
-          _totp.clear();
+          if (mounted) {
+            _accountPassword.clear();
+            _totp.clear();
+          }
         }
       });
 
-  Future<void> _create() => _run(() async {
+  Future<void> _create() => _run((operation) async {
         if (_pending == null) {
           if (_name.text.trim().isEmpty ||
               _name.text.trim().length > 150 ||
@@ -125,29 +202,43 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                 'Usa una contraseña maestra de al menos 12 caracteres y confirma que coincide.');
           }
           final deviceKey = await _api.deviceKey();
+          _ensureCurrentOperation(operation);
           try {
-            _pending = await _crypto.prepare(
+            final pending = await _crypto.prepare(
                 name: _name.text,
                 description: _description.text,
                 password: _master.text,
                 deviceId: _api.deviceId,
                 deviceKey: deviceKey);
-            _retryKey = VaultCryptoService.newId();
-            await _api.savePending(_pending!, _retryKey!);
+            _ensureCurrentOperation(operation);
+            final retryKey = VaultCryptoService.newId();
+            await _api.savePending(pending, retryKey);
+            _ensureCurrentOperation(operation);
+            _pending = pending;
+            _retryKey = retryKey;
           } finally {
             deviceKey.fillRange(0, deviceKey.length, 0);
-            _master.clear();
-            _confirmation.clear();
+            if (mounted) {
+              _master.clear();
+              _confirmation.clear();
+            }
           }
         }
         await _api.createVault(_pending!, _retryKey!);
+        _ensureCurrentOperation(operation);
         await _api.clearPending();
+        _ensureCurrentOperation(operation);
         _pending = null;
         _retryKey = null;
         _name.clear();
         _description.clear();
-        _vaults = await _api.listVaults();
-        if (mounted) {
+        final vaults = await _api.listVaults();
+        _ensureCurrentOperation(operation);
+        _vaults = vaults;
+        if (_isCurrentOperation(operation)) {
+          if (!mounted) {
+            return;
+          }
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text(
                   'Bóveda creada. Conserva tu contraseña maestra y este dispositivo.')));
@@ -155,7 +246,11 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       });
 
   Future<void> _reopen(String id) async {
+    if (!_canUseSensitiveFeatures || !mounted) {
+      return;
+    }
     final password = TextEditingController();
+    _reopenPassword = password;
     final accepted = await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -173,27 +268,31 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                       onPressed: () => Navigator.pop(dialogContext, true),
                       child: const Text('Verificar'))
                 ]));
-    if (accepted == true && mounted) {
-      await _run(() async {
+    if (accepted == true && mounted && _canUseSensitiveFeatures) {
+      await _run((operation) async {
         final deviceKey = await _api.deviceKey();
+        _ensureCurrentOperation(operation);
         try {
           final vault = await _api.getVault(id);
+          _ensureCurrentOperation(operation);
           final metadata =
               await _crypto.reopen(vault, password.text, deviceKey);
-          if (mounted) {
-            await showDialog<void>(
-                context: context,
-                builder: (dialogContext) => AlertDialog(
-                        title: Text(metadata['nombre']!),
-                        content: Text(metadata['descripcion']!.isEmpty
-                            ? 'Clave recuperada y metadatos verificados localmente.'
-                            : metadata['descripcion']!),
-                        actions: [
-                          TextButton(
-                              onPressed: () => Navigator.pop(dialogContext),
-                              child: const Text('Cerrar'))
-                        ]));
+          _ensureCurrentOperation(operation);
+          if (!mounted) {
+            return;
           }
+          await showDialog<void>(
+              context: context,
+              builder: (dialogContext) => AlertDialog(
+                      title: Text(metadata['nombre']!),
+                      content: Text(metadata['descripcion']!.isEmpty
+                          ? 'Clave recuperada y metadatos verificados localmente.'
+                          : metadata['descripcion']!),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(dialogContext),
+                            child: const Text('Cerrar'))
+                      ]));
         } catch (error) {
           if (error is VaultApiException) rethrow;
           throw VaultApiException(
@@ -203,6 +302,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           password.clear();
         }
       });
+    }
+    if (identical(_reopenPassword, password)) {
+      _reopenPassword = null;
     }
     password.dispose();
   }
@@ -214,7 +316,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           child: TextField(
               controller: controller,
               obscureText: secret,
-              enabled: !_busy && enabled,
+              enabled: !_busy && enabled && _canUseSensitiveFeatures,
               maxLength: maxLength,
               autocorrect: !secret,
               enableSuggestions: !secret,
@@ -226,7 +328,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
       child: TextField(
           controller: _totp,
           obscureText: true,
-          enabled: !_busy,
+          enabled: !_busy && _canUseSensitiveFeatures,
           keyboardType: TextInputType.number,
           inputFormatters: [
             FilteringTextInputFormatter.digitsOnly,
@@ -246,7 +348,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           if (_api.authenticated)
             IconButton(
                 tooltip: 'Cerrar sesión de bóvedas',
-                onPressed: _busy
+                onPressed: _busy || !_canUseSensitiveFeatures
                     ? null
                     : () => setState(() {
                           _api.logout();
@@ -273,7 +375,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             _field(_accountPassword, 'Contraseña de la cuenta', secret: true),
             _totpField(),
             FilledButton(
-                onPressed: _busy ? null : _login,
+                onPressed: _busy || !_canUseSensitiveFeatures ? null : _login,
                 child: const Text('Ingresar')),
           ] else ...[
             const Text('Crear una bóveda vacía',
@@ -292,16 +394,17 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                   secret: true)
             ],
             FilledButton(
-                onPressed: _busy ? null : _create,
+                onPressed: _busy || !_canUseSensitiveFeatures ? null : _create,
                 child: Text(_pending == null
                     ? 'Crear bóveda'
                     : 'Reintentar la misma creación')),
             if (_pending != null)
               TextButton(
-                  onPressed: _busy
+                  onPressed: _busy || !_canUseSensitiveFeatures
                       ? null
-                      : () => _run(() async {
+                      : () => _run((operation) async {
                             await _api.clearPending();
+                            _ensureCurrentOperation(operation);
                             _pending = null;
                             _retryKey = null;
                           }),
@@ -311,10 +414,12 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               const Expanded(
                   child: Text('Mis bóvedas', style: TextStyle(fontSize: 20))),
               IconButton(
-                  onPressed: _busy
+                  onPressed: _busy || !_canUseSensitiveFeatures
                       ? null
-                      : () => _run(() async {
-                            _vaults = await _api.listVaults();
+                      : () => _run((operation) async {
+                            final vaults = await _api.listVaults();
+                            _ensureCurrentOperation(operation);
+                            _vaults = vaults;
                           }),
                   icon: const Icon(Icons.refresh))
             ]),
@@ -327,7 +432,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                     'Bóveda ${vault['id_boveda'].toString().substring(0, 8)}'),
                 subtitle: const Text('Nombre protegido · propietario'),
                 trailing: const Icon(Icons.verified_user),
-                onTap: _busy
+                onTap: _busy || !_canUseSensitiveFeatures
                     ? null
                     : () => _reopen(vault['id_boveda'] as String))),
           ],

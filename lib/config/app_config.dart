@@ -4,6 +4,10 @@ class AppConfig {
   static const String appName = 'Bóveda Híbrida Mobile';
   static const String configuredApiUrl =
       String.fromEnvironment('BOVEDA_API_URL');
+  static const int backgroundLockTimeoutSeconds = int.fromEnvironment(
+    'BOVEDA_LOCK_TIMEOUT_SECONDS',
+    defaultValue: 30,
+  );
   static const Set<String> _debugHttpHosts = {
     'localhost',
     '127.0.0.1',
@@ -17,6 +21,10 @@ class AppConfig {
 
   static String get healthEndpoint => '$baseUrl/health';
   static String get databaseHealthEndpoint => '$baseUrl/health/database';
+  static Duration get backgroundLockTimeout => Duration(
+        seconds:
+            backgroundLockTimeoutSeconds < 0 ? 0 : backgroundLockTimeoutSeconds,
+      );
 
   static String resolveApiUrl({
     String? configuredUrl,

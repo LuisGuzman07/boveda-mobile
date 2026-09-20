@@ -6,6 +6,9 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import '../config/app_config.dart';
+import 'app_lock_service.dart';
+import 'device_identity_api_service.dart';
+import 'installation_identity_service.dart';
 import 'vault_crypto_service.dart';
 
 class VaultApiException implements Exception {
@@ -23,30 +26,69 @@ class VaultApiService {
   String? _deviceId;
   String? _userId;
   SimpleKeyPair? _signingKey;
+  AppLockService? _lockService;
+  final http.Client? _client;
+  final DeviceIdentityApiService _deviceIdentity;
 
-  VaultApiService({FlutterSecureStorage? storage, String? baseUrl})
-      : storage = storage ??
+  VaultApiService({
+    FlutterSecureStorage? storage,
+    String? baseUrl,
+    AppLockService? lockService,
+    DeviceIdentityApiService? deviceIdentityApi,
+    InstallationIdentityProvider? installationIdentity,
+    http.Client? client,
+  })  : storage = storage ??
             const FlutterSecureStorage(
                 aOptions: AndroidOptions(encryptedSharedPreferences: true)),
-        baseUrl = AppConfig.resolveApiUrl(
-          configuredUrl:
-              baseUrl ?? (configuredUrl.isNotEmpty ? configuredUrl : null),
-          port: 8001,
-        );
+        _lockService = lockService,
+        _client = client,
+        baseUrl = _resolveBaseUrl(baseUrl),
+        _deviceIdentity = deviceIdentityApi ??
+            DeviceIdentityApiService(
+              identity: installationIdentity,
+              lockService: lockService,
+              client: client,
+              baseUrl: _resolveBaseUrl(baseUrl),
+            ) {
+    if (lockService != null) {
+      _deviceIdentity.attachLockService(lockService);
+    }
+  }
 
-  bool get authenticated => _token != null;
-  String get deviceId => _deviceId!;
+  static String _resolveBaseUrl(String? baseUrl) => AppConfig.resolveApiUrl(
+        configuredUrl:
+            baseUrl ?? (configuredUrl.isNotEmpty ? configuredUrl : null),
+        port: 8000,
+      );
+
+  bool get authenticated => _token != null && _allowsSensitiveActions;
+  String get deviceId {
+    _ensureUnlocked();
+    final identifier = _deviceId;
+    if (identifier == null) {
+      throw VaultApiException('Inicia sesión nuevamente.');
+    }
+    return identifier;
+  }
+
+  void attachLockService(AppLockService lockService) {
+    _lockService = lockService;
+    _deviceIdentity.attachLockService(lockService);
+  }
 
   Future<Map<String, dynamic>> _request(String method, String path,
       {Map<String, dynamic>? body,
       String? token,
       String? retryKey,
-      bool signed = false}) async {
+      bool signed = false,
+      Map<String, String>? extraHeaders}) async {
+    _ensureUnlocked();
     final uri = Uri.parse('$baseUrl$path');
     final text = body == null ? '' : jsonEncode(body);
     final headers = <String, String>{'Content-Type': 'application/json'};
     if (token != null) headers['Authorization'] = 'Bearer $token';
     if (retryKey != null) headers['Idempotency-Key'] = retryKey;
+    if (extraHeaders != null) headers.addAll(extraHeaders);
     if (signed) {
       if (_token == null || _signingKey == null) {
         throw VaultApiException('Inicia sesión nuevamente.');
@@ -70,7 +112,7 @@ class VaultApiService {
       headers['X-Vault-Timestamp'] = timestamp;
       headers['X-Vault-Signature'] = base64Encode(signature.bytes);
     }
-    final client = http.Client();
+    final client = _client ?? http.Client();
     try {
       final request = http.Request(method, uri)
         ..headers.addAll(headers)
@@ -78,6 +120,7 @@ class VaultApiService {
       final response = await http.Response.fromStream(
               await client.send(request).timeout(const Duration(seconds: 20)))
           .timeout(const Duration(seconds: 20));
+      _ensureUnlocked();
       final data = jsonDecode(response.body);
       if (response.statusCode >= 400) {
         if (signed && response.statusCode == 401) logout();
@@ -91,11 +134,14 @@ class VaultApiService {
       throw VaultApiException(
           'No se pudo conectar con el backend. Verifica Docker y la URL.');
     } finally {
-      client.close();
+      if (_client == null) {
+        client.close();
+      }
     }
   }
 
   Future<void> login(String email, String password, String code) async {
+    _ensureUnlocked();
     if (kIsWeb) {
       throw VaultApiException(
           'CU-06 requiere Android o escritorio con almacenamiento seguro; usa la web React para administrar.');
@@ -103,61 +149,80 @@ class VaultApiService {
     logout();
     final account = email.trim().toLowerCase();
     final scope = hashes.sha256.convert(utf8.encode(account)).toString();
-    var identifier = await storage.read(key: 'cu06_device_id');
-    if (identifier == null) {
-      identifier = VaultCryptoService.newId();
-      await storage.write(key: 'cu06_device_id', value: identifier);
-    }
     var seed = await storage.read(key: 'cu06_signing_$scope');
+    _ensureUnlocked();
     if (seed == null) {
       seed = base64Encode(VaultCryptoService.randomBytes(32));
       await storage.write(key: 'cu06_signing_$scope', value: seed);
+      _ensureUnlocked();
     }
     final signingKey = await Ed25519().newKeyPairFromSeed(base64Decode(seed));
-    final publicKey = base64Encode((await signingKey.extractPublicKey()).bytes);
-    final device = {
-      'nombre': 'Bóveda móvil',
-      'tipo': 'MOVIL',
-      'sistema_operativo': Platform.operatingSystem,
-      'identificador_seguro': identifier,
-      'public_key': publicKey,
-      'confiar_dispositivo': true
-    };
-    var auth = await _request('POST', '/auth/login', body: {
-      'correo': account,
-      'password': password,
-      'dispositivo': device,
-      'confiar_dispositivo': true
-    });
-    if (auth['mfa_required'] != true) {
-      throw VaultApiException(
-          'Activa MFA TOTP desde la web antes de crear bóvedas.');
-    }
-    auth = await _request('POST', '/auth/mfa/verify-login', body: {
-      'mfa_token': auth['mfa_token'],
-      'code': code.trim(),
-      'dispositivo': device,
-      'confiar_dispositivo': true
-    });
-    final session = await _request('POST', '/vaults/session',
-        token: auth['access_token'] as String,
-        body: {
-          'refresh_token': auth['refresh_token'],
+    var adoptedSigningKey = false;
+    try {
+      _ensureUnlocked();
+      final vaultPublicKey =
+          base64Encode((await signingKey.extractPublicKey()).bytes);
+      _ensureUnlocked();
+      final device = await _deviceIdentity.loginDevicePayload(
+        vaultPublicKey: vaultPublicKey,
+      );
+      _ensureUnlocked();
+      var auth = await _request('POST', '/auth/login', body: {
+        'correo': account,
+        'password': password,
+        'dispositivo': device,
+      });
+      if (auth['mfa_required'] == true) {
+        final mfaToken = auth['mfa_token'];
+        if (mfaToken is! String) {
+          throw VaultApiException('El backend no entregó el token MFA.');
+        }
+        auth = await _request('POST', '/auth/mfa/verify-login', body: {
+          'mfa_token': mfaToken,
           'code': code.trim(),
-          'public_key': publicKey
         });
-    _token = session['access_token'] as String;
-    _deviceId = session['id_dispositivo'] as String;
-    _userId = session['id_usuario'] as String;
-    _signingKey = signingKey;
+      }
+      final nativeAccessToken = auth['access_token'];
+      if (nativeAccessToken is! String) {
+        throw VaultApiException(
+            'El backend no entregó una sesión nativa válida.');
+      }
+      await _deviceIdentity.enrollAndProve(accessToken: nativeAccessToken);
+      _ensureUnlocked();
+      final vaultChallenge = await _deviceIdentity.vaultSessionProof(
+        accessToken: nativeAccessToken,
+      );
+      _ensureUnlocked();
+      final session = await _request('POST', '/vaults/session',
+          token: nativeAccessToken,
+          extraHeaders: {'X-Device-Id': vaultChallenge.installationId},
+          body: vaultChallenge.requestBody);
+      _ensureUnlocked();
+      _token = session['access_token'] as String;
+      _deviceId = session['id_dispositivo'] as String;
+      _userId = session['id_usuario'] as String;
+      _signingKey = signingKey;
+      adoptedSigningKey = true;
+    } on DeviceIdentityApiException catch (error) {
+      throw VaultApiException(error.message);
+    } on InstallationIdentityException catch (error) {
+      throw VaultApiException(error.message);
+    } finally {
+      if (!adoptedSigningKey) {
+        signingKey.destroy();
+      }
+    }
   }
 
   Future<Uint8List> deviceKey() async {
+    _ensureUnlocked();
     final storageKey = 'cu06_wrapping_$_userId';
     var encoded = await storage.read(key: storageKey);
+    _ensureUnlocked();
     if (encoded == null) {
       encoded = base64Encode(VaultCryptoService.randomBytes(32));
       await storage.write(key: storageKey, value: encoded);
+      _ensureUnlocked();
     }
     return base64Decode(encoded);
   }
@@ -176,17 +241,28 @@ class VaultApiService {
       _request('POST', '/vaults', body: body, retryKey: retryKey, signed: true);
 
   Future<Map<String, dynamic>?> pendingCreation() async {
+    _ensureUnlocked();
     final encoded = await storage.read(key: 'cu06_pending_$_userId');
+    _ensureUnlocked();
     return encoded == null
         ? null
         : Map<String, dynamic>.from(jsonDecode(encoded) as Map);
   }
 
-  Future<void> savePending(Map<String, dynamic> body, String retryKey) =>
-      storage.write(
-          key: 'cu06_pending_$_userId',
-          value: jsonEncode({'body': body, 'retry_key': retryKey}));
-  Future<void> clearPending() => storage.delete(key: 'cu06_pending_$_userId');
+  Future<void> savePending(Map<String, dynamic> body, String retryKey) async {
+    _ensureUnlocked();
+    await storage.write(
+      key: 'cu06_pending_$_userId',
+      value: jsonEncode({'body': body, 'retry_key': retryKey}),
+    );
+    _ensureUnlocked();
+  }
+
+  Future<void> clearPending() async {
+    _ensureUnlocked();
+    await storage.delete(key: 'cu06_pending_$_userId');
+    _ensureUnlocked();
+  }
 
   void logout() {
     _token = null;
@@ -194,5 +270,16 @@ class VaultApiService {
     _userId = null;
     _signingKey?.destroy();
     _signingKey = null;
+  }
+
+  bool get _allowsSensitiveActions =>
+      _lockService == null || _lockService!.allowsSensitiveActions;
+
+  void _ensureUnlocked() {
+    if (!_allowsSensitiveActions) {
+      throw VaultApiException(
+        'Desbloquea la aplicación antes de usar las bóvedas cifradas.',
+      );
+    }
   }
 }
