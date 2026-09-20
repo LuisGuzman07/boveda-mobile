@@ -29,6 +29,11 @@ migrate_working_dir/
 .pub/
 /build/
 
+# Environment files and generated native integration state
+*.env
+!*.env.example
+/ios/Flutter/ephemeral/
+
 # Android related
 **/android/**/gradle-wrapper.jar
 **/android/.gradle
