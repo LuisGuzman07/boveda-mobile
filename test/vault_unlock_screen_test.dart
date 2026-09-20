@@ -119,7 +119,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Bóveda desbloqueada'), findsOneWidget);
-    expect(find.textContaining('operaciones de archivos'), findsOneWidget);
+    expect(find.textContaining('Los archivos se cifran'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vault-add-file')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.ensureVisible(find.text('Bloquear'));
     await tester.pumpAndSettle();

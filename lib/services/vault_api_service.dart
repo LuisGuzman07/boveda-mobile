@@ -6,6 +6,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import '../config/app_config.dart';
+import '../features/file_upload/domain/vault_file_upload_api.dart';
 import 'app_lock_service.dart';
 import 'device_identity_api_service.dart';
 import 'installation_identity_service.dart';
@@ -21,7 +22,7 @@ class VaultApiException implements Exception {
   String toString() => message;
 }
 
-class VaultApiService {
+class VaultApiService implements VaultFileUploadApi {
   static const configuredUrl = String.fromEnvironment('BOVEDA_API_URL');
   static const vaultSessionPath = '/vaults/session';
   final FlutterSecureStorage storage;
@@ -309,6 +310,53 @@ class VaultApiService {
   Future<Map<String, dynamic>> createVault(
           Map<String, dynamic> body, String retryKey) =>
       _request('POST', '/vaults', body: body, retryKey: retryKey, signed: true);
+
+  @override
+  Future<Map<String, dynamic>> createFileUploadIntent(
+    String vaultId,
+    int ciphertextLength,
+    String retryKey,
+  ) =>
+      _request(
+        'POST',
+        '/vaults/$vaultId/files/upload-intents',
+        body: <String, dynamic>{
+          'tamano_ciphertext_esperado': ciphertextLength,
+          'version_criptografica': 1,
+        },
+        retryKey: retryKey,
+        signed: true,
+      );
+
+  @override
+  Future<Map<String, dynamic>> completeFileUpload(
+    String vaultId,
+    String fileId,
+    String versionId,
+    Map<String, dynamic> body,
+    String retryKey,
+  ) =>
+      _request(
+        'POST',
+        '/vaults/$vaultId/files/$fileId/versions/$versionId/complete',
+        body: body,
+        retryKey: retryKey,
+        signed: true,
+      );
+
+  @override
+  Future<Map<String, dynamic>> abortFileUpload(
+    String vaultId,
+    String fileId,
+    String versionId,
+    String retryKey,
+  ) =>
+      _request(
+        'POST',
+        '/vaults/$vaultId/files/$fileId/versions/$versionId/abort',
+        retryKey: retryKey,
+        signed: true,
+      );
 
   Future<Map<String, dynamic>?> pendingCreation() async {
     _ensureUnlocked();

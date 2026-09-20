@@ -3,6 +3,37 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
+class VaultAesGcmCiphertext {
+  VaultAesGcmCiphertext({
+    required this.ciphertext,
+    required this.nonce,
+    required this.tag,
+  });
+
+  final Uint8List ciphertext;
+  final Uint8List nonce;
+  final Uint8List tag;
+
+  Map<String, dynamic> toEnvelopeJson() => <String, dynamic>{
+        'algoritmo': 'AES-256-GCM',
+        'ciphertext': base64Encode(ciphertext),
+        'nonce': base64Encode(nonce),
+        'tag': base64Encode(tag),
+      };
+
+  Map<String, dynamic> toContentInfoJson() => <String, dynamic>{
+        'algoritmo': 'AES-256-GCM',
+        'nonce': base64Encode(nonce),
+        'tag': base64Encode(tag),
+      };
+
+  void dispose() {
+    ciphertext.fillRange(0, ciphertext.length, 0);
+    nonce.fillRange(0, nonce.length, 0);
+    tag.fillRange(0, tag.length, 0);
+  }
+}
+
 class VaultUnlockResult {
   VaultUnlockResult({
     required this.vaultId,
@@ -62,6 +93,35 @@ class VaultCryptoService {
     return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
   }
 
+  Future<VaultAesGcmCiphertext> encryptBytes(
+    List<int> bytes,
+    SecretKey key,
+    String aad, {
+    List<int>? nonce,
+  }) async {
+    final selectedNonce =
+        nonce == null ? randomBytes(12) : Uint8List.fromList(nonce);
+    if (selectedNonce.length != 12) {
+      selectedNonce.fillRange(0, selectedNonce.length, 0);
+      throw ArgumentError.value(nonce, 'nonce', 'Debe tener 12 bytes.');
+    }
+    try {
+      final box = await _cipher.encrypt(
+        bytes,
+        secretKey: key,
+        nonce: selectedNonce,
+        aad: utf8.encode(aad),
+      );
+      return VaultAesGcmCiphertext(
+        ciphertext: Uint8List.fromList(box.cipherText),
+        nonce: Uint8List.fromList(box.nonce),
+        tag: Uint8List.fromList(box.mac.bytes),
+      );
+    } finally {
+      selectedNonce.fillRange(0, selectedNonce.length, 0);
+    }
+  }
+
   Future<SecretKey> _derive(String password, List<int> salt) {
     return Argon2id(
             parallelism: 1, memory: 65536, iterations: 3, hashLength: 32)
@@ -69,15 +129,17 @@ class VaultCryptoService {
   }
 
   Future<Map<String, dynamic>> encrypt(
-      List<int> bytes, SecretKey key, String aad) async {
-    final box = await _cipher.encrypt(bytes,
-        secretKey: key, nonce: randomBytes(12), aad: utf8.encode(aad));
-    return {
-      'algoritmo': 'AES-256-GCM',
-      'ciphertext': base64Encode(box.cipherText),
-      'nonce': base64Encode(box.nonce),
-      'tag': base64Encode(box.mac.bytes)
-    };
+    List<int> bytes,
+    SecretKey key,
+    String aad, {
+    List<int>? nonce,
+  }) async {
+    final encrypted = await encryptBytes(bytes, key, aad, nonce: nonce);
+    try {
+      return encrypted.toEnvelopeJson();
+    } finally {
+      encrypted.dispose();
+    }
   }
 
   Future<Uint8List> decrypt(

@@ -1,4 +1,7 @@
 import 'package:flutter/foundation.dart';
+import 'package:cryptography/cryptography.dart';
+
+import '../../../services/vault_crypto_service.dart';
 
 typedef VaultClock = DateTime Function();
 
@@ -34,6 +37,38 @@ class VaultUnlockSession extends ChangeNotifier {
 
   bool isGenerationCurrent(int generation) =>
       isActive && generation == _generation;
+
+  /// Encrypts a file key with the private in-memory vault key without exposing Kv.
+  Future<Map<String, dynamic>> wrapFileKey({
+    required VaultCryptoService crypto,
+    required Uint8List fileKey,
+    required String aad,
+    required List<int> nonce,
+  }) async {
+    if (_disposed || !isActive) {
+      throw StateError('La sesión de desbloqueo ya no está activa.');
+    }
+    final vaultKey = _vaultKey;
+    if (vaultKey == null) {
+      throw StateError('La sesión de desbloqueo ya no está activa.');
+    }
+    final generation = _generation;
+    final wrappingKey = SecretKey(vaultKey);
+    try {
+      final envelope = await crypto.encrypt(
+        fileKey,
+        wrappingKey,
+        aad,
+        nonce: nonce,
+      );
+      if (!isGenerationCurrent(generation)) {
+        throw StateError('La sesión de desbloqueo cambió durante el cifrado.');
+      }
+      return envelope;
+    } finally {
+      wrappingKey.destroy();
+    }
+  }
 
   void activate({
     required String vaultId,

@@ -74,6 +74,42 @@ class AppConfig {
     );
   }
 
+  static Uri validateObjectStorageUploadUrl(
+    String value, {
+    bool? debugMode,
+    bool? releaseMode,
+  }) {
+    final normalized = value.trim();
+    late Uri uri;
+    try {
+      uri = Uri.parse(normalized);
+    } on FormatException {
+      throw StateError('La autorización temporal de carga no es válida.');
+    }
+
+    if (!uri.hasScheme ||
+        !uri.hasAuthority ||
+        uri.userInfo.isNotEmpty ||
+        uri.path.isEmpty) {
+      throw StateError('La autorización temporal de carga no es válida.');
+    }
+    if (uri.scheme == 'https') {
+      return uri;
+    }
+
+    final isDebug = debugMode ?? kDebugMode;
+    final isRelease = releaseMode ?? kReleaseMode;
+    if (uri.scheme == 'http' &&
+        isDebug &&
+        !isRelease &&
+        _debugHttpHosts.contains(uri.host.toLowerCase())) {
+      return uri;
+    }
+    throw StateError(
+      'La carga directa debe usar HTTPS fuera del desarrollo local.',
+    );
+  }
+
   static String _developmentUrl({
     required int port,
     required bool web,
