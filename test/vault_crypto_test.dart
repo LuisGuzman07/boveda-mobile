@@ -36,4 +36,74 @@ void main() {
             'Contraseña maestra única 2026', deviceKey),
         throwsA(isA<SecretBoxAuthenticationError>()));
   }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('CU07 rejects altered tag, nonce, AAD and unsupported versions',
+      () async {
+    final crypto = VaultCryptoService();
+    final deviceId = VaultCryptoService.newId();
+    final deviceKey = VaultCryptoService.randomBytes(32);
+    final vault = await crypto.prepare(
+      name: 'Bóveda',
+      description: 'Metadatos',
+      password: 'Master password CU07',
+      deviceId: deviceId,
+      deviceKey: deviceKey,
+    );
+
+    for (final field in <String>['tag', 'nonce']) {
+      final altered = _copy(vault);
+      final envelope =
+          Map<String, dynamic>.from(altered['clave_envuelta'] as Map);
+      final bytes = base64Decode(envelope[field] as String);
+      bytes[0] ^= 1;
+      envelope[field] = base64Encode(bytes);
+      altered['clave_envuelta'] = envelope;
+      await expectLater(
+        crypto.reopen(
+          altered,
+          'Master password CU07',
+          deviceKey,
+          expectedDeviceId: deviceId,
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
+    }
+
+    final alteredAad = _copy(vault);
+    alteredAad['id_boveda'] = VaultCryptoService.newId();
+    await expectLater(
+      crypto.reopen(
+        alteredAad,
+        'Master password CU07',
+        deviceKey,
+        expectedDeviceId: deviceId,
+      ),
+      throwsA(isA<SecretBoxAuthenticationError>()),
+    );
+
+    final futureVersion = _copy(vault);
+    futureVersion['version_criptografica'] = 2;
+    await expectLater(
+      crypto.reopen(
+        futureVersion,
+        'Master password CU07',
+        deviceKey,
+        expectedDeviceId: deviceId,
+      ),
+      throwsA(isA<FormatException>()),
+    );
+    await expectLater(
+      crypto.reopen(
+        vault,
+        'Master password CU07',
+        deviceKey,
+        expectedDeviceId: VaultCryptoService.newId(),
+      ),
+      throwsA(isA<FormatException>()),
+    );
+    deviceKey.fillRange(0, deviceKey.length, 0);
+  }, timeout: const Timeout(Duration(minutes: 5)));
 }
+
+Map<String, dynamic> _copy(Map<String, dynamic> value) =>
+    Map<String, dynamic>.from(jsonDecode(jsonEncode(value)) as Map);

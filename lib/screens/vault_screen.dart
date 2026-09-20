@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../features/vault_unlock/presentation/vault_unlock_screen.dart';
 import '../services/app_lock_service.dart';
 import '../services/installation_identity_service.dart';
 import '../services/vault_api_service.dart';
@@ -33,7 +34,6 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   Map<String, dynamic>? _pending;
   String? _retryKey;
   AppLockService? _lockService;
-  TextEditingController? _reopenPassword;
   int _operation = 0;
 
   @override
@@ -103,7 +103,6 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
 
   void _clearSensitiveState({required bool notify}) {
     _clearPasswords();
-    _reopenPassword?.clear();
     _email.clear();
     _name.clear();
     _description.clear();
@@ -124,7 +123,6 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _lockService?.removeListener(_onLockChanged);
     _clearPasswords();
-    _reopenPassword?.clear();
     _api.logout();
     for (final controller in [
       _email,
@@ -261,70 +259,6 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         }
       });
 
-  Future<void> _reopen(String id) async {
-    if (!_canUseSensitiveFeatures || !mounted) {
-      return;
-    }
-    final password = TextEditingController();
-    _reopenPassword = password;
-    final accepted = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-                title: const Text('Verificar bóveda'),
-                content: TextField(
-                    controller: password,
-                    obscureText: true,
-                    decoration:
-                        const InputDecoration(labelText: 'Contraseña maestra')),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.pop(dialogContext, false),
-                      child: const Text('Cancelar')),
-                  FilledButton(
-                      onPressed: () => Navigator.pop(dialogContext, true),
-                      child: const Text('Verificar'))
-                ]));
-    if (accepted == true && mounted && _canUseSensitiveFeatures) {
-      await _run((operation) async {
-        final deviceKey = await _api.deviceKey();
-        _ensureCurrentOperation(operation);
-        try {
-          final vault = await _api.getVault(id);
-          _ensureCurrentOperation(operation);
-          final metadata =
-              await _crypto.reopen(vault, password.text, deviceKey);
-          _ensureCurrentOperation(operation);
-          if (!mounted) {
-            return;
-          }
-          await showDialog<void>(
-              context: context,
-              builder: (dialogContext) => AlertDialog(
-                      title: Text(metadata['nombre']!),
-                      content: Text(metadata['descripcion']!.isEmpty
-                          ? 'Clave recuperada y metadatos verificados localmente.'
-                          : metadata['descripcion']!),
-                      actions: [
-                        TextButton(
-                            onPressed: () => Navigator.pop(dialogContext),
-                            child: const Text('Cerrar'))
-                      ]));
-        } catch (error) {
-          if (error is VaultApiException) rethrow;
-          throw VaultApiException(
-              'Contraseña incorrecta, clave local diferente o datos alterados.');
-        } finally {
-          deviceKey.fillRange(0, deviceKey.length, 0);
-          password.clear();
-        }
-      });
-    }
-    if (identical(_reopenPassword, password)) {
-      _reopenPassword = null;
-    }
-    password.dispose();
-  }
-
   Widget _field(TextEditingController controller, String label,
           {bool secret = false, int? maxLength, bool enabled = true}) =>
       Padding(
@@ -444,7 +378,14 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                 trailing: const Icon(Icons.verified_user),
                 onTap: _busy || !_canUseSensitiveFeatures
                     ? null
-                    : () => _reopen(vault['id_boveda'] as String))),
+                    : () => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => VaultUnlockScreen(
+                              api: _api,
+                              vaultId: vault['id_boveda'] as String,
+                            ),
+                          ),
+                        ))),
           ],
         ]));
   }

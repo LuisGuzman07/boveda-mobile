@@ -3,6 +3,40 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
+class VaultUnlockResult {
+  VaultUnlockResult({
+    required this.vaultId,
+    required this.cryptoVersion,
+    required this.name,
+    required this.description,
+    required Uint8List vaultKey,
+  }) : _vaultKey = vaultKey;
+
+  final String vaultId;
+  final int cryptoVersion;
+  final String name;
+  final String description;
+  Uint8List? _vaultKey;
+
+  /// Transfers the mutable key buffer to the in-memory unlock session.
+  Uint8List takeVaultKey() {
+    final vaultKey = _vaultKey;
+    if (vaultKey == null) {
+      throw StateError('El material de desbloqueo ya fue descartado.');
+    }
+    _vaultKey = null;
+    return vaultKey;
+  }
+
+  void dispose() {
+    final vaultKey = _vaultKey;
+    if (vaultKey != null) {
+      vaultKey.fillRange(0, vaultKey.length, 0);
+      _vaultKey = null;
+    }
+  }
+}
+
 class VaultCryptoService {
   static const kdfParameters = {
     'algoritmo': 'Argon2id',
@@ -100,47 +134,103 @@ class VaultCryptoService {
   }
 
   Future<Map<String, String>> reopen(
-      Map<String, dynamic> vault, String password, List<int> deviceKey) async {
-    if (vault['version_criptografica'] != 1 ||
-        jsonEncode(vault['kdf_parametros']) != jsonEncode(kdfParameters)) {
-      final parameters =
-          Map<String, dynamic>.from(vault['kdf_parametros'] as Map);
-      if (vault['version_criptografica'] != 1 ||
-          kdfParameters.entries
-              .any((entry) => parameters[entry.key] != entry.value)) {
-        throw const FormatException('Versión criptográfica no compatible');
-      }
-    }
-    final vaultId = vault['id_boveda'] as String;
-    final envelope = Map<String, dynamic>.from(vault['clave_envuelta'] as Map);
-    final deviceId = envelope['id_dispositivo'];
-    final innerBytes = await decrypt(
-        envelope, SecretKey(deviceKey), '$vaultId:$deviceId:device:v1');
-    final derived =
-        await _derive(password, base64Decode(vault['kdf_salt'] as String));
-    Uint8List? vaultBytes;
+    Map<String, dynamic> vault,
+    String password,
+    List<int> deviceKey, {
+    String? expectedDeviceId,
+  }) async {
+    final result = await unlock(
+      vault: vault,
+      password: password,
+      deviceKey: deviceKey,
+      expectedDeviceId: expectedDeviceId,
+    );
     try {
+      return {'nombre': result.name, 'descripcion': result.description};
+    } finally {
+      result.dispose();
+    }
+  }
+
+  Future<VaultUnlockResult> unlock({
+    required Map<String, dynamic> vault,
+    required String password,
+    required List<int> deviceKey,
+    String? expectedDeviceId,
+  }) async {
+    _validateVaultContract(vault);
+    final vaultId = _requiredString(vault, 'id_boveda');
+    final envelope = Map<String, dynamic>.from(vault['clave_envuelta'] as Map);
+    final deviceId = _requiredString(envelope, 'id_dispositivo');
+    if (expectedDeviceId != null && deviceId != expectedDeviceId) {
+      throw const FormatException('El sobre no pertenece a este dispositivo.');
+    }
+
+    Uint8List? innerBytes;
+    Uint8List? vaultBytes;
+    Uint8List? nameBytes;
+    Uint8List? descriptionBytes;
+    final derived = await _derive(
+        password, base64Decode(_requiredString(vault, 'kdf_salt')));
+    try {
+      innerBytes = await decrypt(
+        envelope,
+        SecretKey(deviceKey),
+        '$vaultId:$deviceId:device:v1',
+      );
       final inner =
           Map<String, dynamic>.from(jsonDecode(utf8.decode(innerBytes)) as Map);
       vaultBytes = await decrypt(inner, derived, '$vaultId:password:v1');
       final key = SecretKey(vaultBytes);
-      final nameBytes = await decrypt(
-          Map<String, dynamic>.from(vault['nombre_cifrado'] as Map),
-          key,
-          '$vaultId:name:v1');
+      nameBytes = await decrypt(
+        Map<String, dynamic>.from(vault['nombre_cifrado'] as Map),
+        key,
+        '$vaultId:name:v1',
+      );
       final description = vault['descripcion_cifrada'];
-      final descriptionBytes = description == null
+      descriptionBytes = description == null
           ? Uint8List(0)
-          : await decrypt(Map<String, dynamic>.from(description as Map), key,
-              '$vaultId:description:v1');
-      return {
-        'nombre': utf8.decode(nameBytes),
-        'descripcion': utf8.decode(descriptionBytes)
-      };
+          : await decrypt(
+              Map<String, dynamic>.from(description as Map),
+              key,
+              '$vaultId:description:v1',
+            );
+      final unlockKey = vaultBytes;
+      vaultBytes = null;
+      return VaultUnlockResult(
+        vaultId: vaultId,
+        cryptoVersion: vault['version_criptografica'] as int,
+        name: utf8.decode(nameBytes),
+        description: utf8.decode(descriptionBytes),
+        vaultKey: unlockKey,
+      );
     } finally {
       vaultBytes?.fillRange(0, vaultBytes.length, 0);
-      innerBytes.fillRange(0, innerBytes.length, 0);
+      innerBytes?.fillRange(0, innerBytes.length, 0);
+      nameBytes?.fillRange(0, nameBytes.length, 0);
+      descriptionBytes?.fillRange(0, descriptionBytes.length, 0);
       derived.destroy();
+    }
+  }
+
+  static String _requiredString(Map<String, dynamic> values, String key) {
+    final value = values[key];
+    if (value is! String || value.isEmpty) {
+      throw const FormatException('Datos de bóveda incompatibles.');
+    }
+    return value;
+  }
+
+  static void _validateVaultContract(Map<String, dynamic> vault) {
+    if (vault['version_criptografica'] != 1 ||
+        vault['kdf_parametros'] is! Map) {
+      throw const FormatException('Versión criptográfica no compatible');
+    }
+    final parameters =
+        Map<String, dynamic>.from(vault['kdf_parametros'] as Map);
+    if (kdfParameters.entries
+        .any((entry) => parameters[entry.key] != entry.value)) {
+      throw const FormatException('Versión criptográfica no compatible');
     }
   }
 }

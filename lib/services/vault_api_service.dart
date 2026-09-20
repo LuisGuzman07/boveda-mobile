@@ -12,8 +12,11 @@ import 'installation_identity_service.dart';
 import 'vault_crypto_service.dart';
 
 class VaultApiException implements Exception {
+  VaultApiException(this.message, {this.statusCode});
+
   final String message;
-  VaultApiException(this.message);
+  final int? statusCode;
+
   @override
   String toString() => message;
 }
@@ -31,6 +34,7 @@ class VaultApiService {
   AppLockService? _lockService;
   final http.Client? _client;
   final DeviceIdentityApiService _deviceIdentity;
+  final _sessionInvalidationListeners = <VoidCallback>{};
   int _sessionGeneration = 0;
 
   VaultApiService({
@@ -77,6 +81,14 @@ class VaultApiService {
   void attachLockService(AppLockService lockService) {
     _lockService = lockService;
     _deviceIdentity.attachLockService(lockService);
+  }
+
+  void addSessionInvalidationListener(VoidCallback listener) {
+    _sessionInvalidationListeners.add(listener);
+  }
+
+  void removeSessionInvalidationListener(VoidCallback listener) {
+    _sessionInvalidationListeners.remove(listener);
   }
 
   Future<Map<String, dynamic>> _request(String method, String path,
@@ -134,12 +146,14 @@ class VaultApiService {
         await _invalidateRemoteSession(requestSession);
         throw VaultApiException(
           detail ?? 'Solicitud rechazada (${response.statusCode}).',
+          statusCode: response.statusCode,
         );
       }
       _ensureCurrentSession(requestSession);
       if (response.statusCode >= 400) {
         throw VaultApiException(
           detail ?? 'Solicitud rechazada (${response.statusCode}).',
+          statusCode: response.statusCode,
         );
       }
       if (!expectJson) {
@@ -264,6 +278,13 @@ class VaultApiService {
         .toList();
   }
 
+  Future<void> validateVaultSession() async {
+    final data = await _request('GET', vaultSessionPath, signed: true);
+    if (data['status'] != 'active') {
+      throw VaultApiException('La sesión de bóveda no está activa.');
+    }
+  }
+
   Future<List<Map<String, dynamic>>> listVaults() => revalidateSession();
 
   Future<void> revokeSession() async {
@@ -374,6 +395,10 @@ class VaultApiService {
     _accountScope = null;
     _signingKey?.destroy();
     _signingKey = null;
+    for (final listener
+        in List<VoidCallback>.from(_sessionInvalidationListeners)) {
+      listener();
+    }
   }
 
   String? _responseDetail(String body) {
