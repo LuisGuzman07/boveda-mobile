@@ -2,14 +2,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/app_lock_service.dart';
+import '../services/installation_identity_service.dart';
 import '../services/vault_api_service.dart';
 import '../services/vault_crypto_service.dart';
 import '../widgets/app_lock_gate.dart';
 
 class VaultScreen extends StatefulWidget {
-  const VaultScreen({super.key, this.api});
+  const VaultScreen({super.key, this.api, this.installationIdentity});
 
   final VaultApiService? api;
+  final InstallationIdentityProvider? installationIdentity;
 
   @override
   State<VaultScreen> createState() => _VaultScreenState();
@@ -37,7 +39,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    _api = widget.api ?? VaultApiService();
+    _api = widget.api ??
+        VaultApiService(installationIdentity: widget.installationIdentity);
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -174,7 +177,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           _ensureCurrentOperation(operation);
           final pending = await _api.pendingCreation();
           _ensureCurrentOperation(operation);
-          final vaults = await _api.listVaults();
+          final vaults = await _api.revalidateSession();
           _ensureCurrentOperation(operation);
           _pending = pending == null
               ? null
@@ -242,6 +245,19 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text(
                   'Bóveda creada. Conserva tu contraseña maestra y este dispositivo.')));
+        }
+      });
+
+  Future<void> _closeVaultSession() => _run((operation) async {
+        try {
+          await _api.revokeSession();
+        } finally {
+          if (_isCurrentOperation(operation)) {
+            _vaults = <Map<String, dynamic>>[];
+            _pending = null;
+            _retryKey = null;
+            _clearPasswords();
+          }
         }
       });
 
@@ -350,13 +366,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                 tooltip: 'Cerrar sesión de bóvedas',
                 onPressed: _busy || !_canUseSensitiveFeatures
                     ? null
-                    : () => setState(() {
-                          _api.logout();
-                          _vaults = [];
-                          _pending = null;
-                          _retryKey = null;
-                          _clearPasswords();
-                        }),
+                    : _closeVaultSession,
                 icon: const Icon(Icons.logout))
         ]),
         body: ListView(padding: const EdgeInsets.all(20), children: [

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/authenticator_account.dart';
 import '../services/account_storage_service.dart';
 import '../services/app_lock_service.dart';
+import '../services/installation_identity_service.dart';
 import '../services/totp_service.dart';
 import '../widgets/app_lock_gate.dart';
 import 'add_account_screen.dart';
@@ -11,7 +12,9 @@ import 'qr_scanner_screen.dart';
 import 'vault_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.installationIdentity});
+
+  final InstallationIdentityProvider? installationIdentity;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -278,7 +281,11 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: _canUseSensitiveFeatures
                 ? () => Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const VaultScreen()),
+                      MaterialPageRoute(
+                        builder: (_) => VaultScreen(
+                          installationIdentity: widget.installationIdentity,
+                        ),
+                      ),
                     )
                 : null,
           ),

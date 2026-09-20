@@ -20,15 +20,18 @@ class VaultApiException implements Exception {
 
 class VaultApiService {
   static const configuredUrl = String.fromEnvironment('BOVEDA_API_URL');
+  static const vaultSessionPath = '/vaults/session';
   final FlutterSecureStorage storage;
   final String baseUrl;
   String? _token;
   String? _deviceId;
   String? _userId;
+  String? _accountScope;
   SimpleKeyPair? _signingKey;
   AppLockService? _lockService;
   final http.Client? _client;
   final DeviceIdentityApiService _deviceIdentity;
+  int _sessionGeneration = 0;
 
   VaultApiService({
     FlutterSecureStorage? storage,
@@ -81,8 +84,10 @@ class VaultApiService {
       String? token,
       String? retryKey,
       bool signed = false,
+      bool expectJson = true,
       Map<String, String>? extraHeaders}) async {
     _ensureUnlocked();
+    final requestSession = _sessionGeneration;
     final uri = Uri.parse('$baseUrl$path');
     final text = body == null ? '' : jsonEncode(body);
     final headers = <String, String>{'Content-Type': 'application/json'};
@@ -90,12 +95,15 @@ class VaultApiService {
     if (retryKey != null) headers['Idempotency-Key'] = retryKey;
     if (extraHeaders != null) headers.addAll(extraHeaders);
     if (signed) {
-      if (_token == null || _signingKey == null) {
+      final vaultToken = _token;
+      final signingKey = _signingKey;
+      if (vaultToken == null || signingKey == null) {
         throw VaultApiException('Inicia sesión nuevamente.');
       }
-      headers['Authorization'] = 'Bearer $_token';
+      headers['Authorization'] = 'Bearer $vaultToken';
       final payload = jsonDecode(utf8.decode(
-          base64Url.decode(base64Url.normalize(_token!.split('.')[1])))) as Map;
+              base64Url.decode(base64Url.normalize(vaultToken.split('.')[1]))))
+          as Map;
       final timestamp =
           (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
       final digest = hashes.sha256.convert(utf8.encode(text)).toString();
@@ -108,7 +116,8 @@ class VaultApiService {
         digest
       ].join('\n');
       final signature =
-          await Ed25519().sign(utf8.encode(message), keyPair: _signingKey!);
+          await Ed25519().sign(utf8.encode(message), keyPair: signingKey);
+      _ensureCurrentSession(requestSession);
       headers['X-Vault-Timestamp'] = timestamp;
       headers['X-Vault-Signature'] = base64Encode(signature.bytes);
     }
@@ -120,16 +129,23 @@ class VaultApiService {
       final response = await http.Response.fromStream(
               await client.send(request).timeout(const Duration(seconds: 20)))
           .timeout(const Duration(seconds: 20));
-      _ensureUnlocked();
-      final data = jsonDecode(response.body);
-      if (response.statusCode >= 400) {
-        if (signed && response.statusCode == 401) logout();
-        final detail = data is Map ? data['detail'] : null;
-        throw VaultApiException(detail is String
-            ? detail
-            : 'Solicitud rechazada (${response.statusCode}).');
+      final detail = _responseDetail(response.body);
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        await _invalidateRemoteSession(requestSession);
+        throw VaultApiException(
+          detail ?? 'Solicitud rechazada (${response.statusCode}).',
+        );
       }
-      return Map<String, dynamic>.from(data as Map);
+      _ensureCurrentSession(requestSession);
+      if (response.statusCode >= 400) {
+        throw VaultApiException(
+          detail ?? 'Solicitud rechazada (${response.statusCode}).',
+        );
+      }
+      if (!expectJson) {
+        return const <String, dynamic>{};
+      }
+      return _decodeResponse(response);
     } on SocketException {
       throw VaultApiException(
           'No se pudo conectar con el backend. Verifica Docker y la URL.');
@@ -147,8 +163,10 @@ class VaultApiService {
           'CU-06 requiere Android o escritorio con almacenamiento seguro; usa la web React para administrar.');
     }
     logout();
+    final loginSession = _sessionGeneration;
     final account = email.trim().toLowerCase();
     final scope = hashes.sha256.convert(utf8.encode(account)).toString();
+    _accountScope = scope;
     var seed = await storage.read(key: 'cu06_signing_$scope');
     _ensureUnlocked();
     if (seed == null) {
@@ -193,17 +211,28 @@ class VaultApiService {
         accessToken: nativeAccessToken,
       );
       _ensureUnlocked();
-      final session = await _request('POST', '/vaults/session',
+      final session = await _request('POST', vaultSessionPath,
           token: nativeAccessToken,
           extraHeaders: {'X-Device-Id': vaultChallenge.installationId},
           body: vaultChallenge.requestBody);
       _ensureUnlocked();
-      _token = session['access_token'] as String;
-      _deviceId = session['id_dispositivo'] as String;
-      _userId = session['id_usuario'] as String;
+      final vaultToken = session['access_token'];
+      final deviceId = session['id_dispositivo'];
+      final userId = session['id_usuario'];
+      if (vaultToken is! String || deviceId is! String || userId is! String) {
+        throw VaultApiException(
+            'El backend no entregó una sesión de bóveda válida.');
+      }
+      _token = vaultToken;
+      _deviceId = deviceId;
+      _userId = userId;
       _signingKey = signingKey;
       adoptedSigningKey = true;
     } on DeviceIdentityApiException catch (error) {
+      if ((error.statusCode == 401 || error.statusCode == 403) &&
+          loginSession == _sessionGeneration) {
+        await _invalidateRemoteSession(loginSession);
+      }
       throw VaultApiException(error.message);
     } on InstallationIdentityException catch (error) {
       throw VaultApiException(error.message);
@@ -216,22 +245,42 @@ class VaultApiService {
 
   Future<Uint8List> deviceKey() async {
     _ensureUnlocked();
-    final storageKey = 'cu06_wrapping_$_userId';
+    final requestSession = _sessionGeneration;
+    final storageKey = 'cu06_wrapping_${_requireUserId()}';
     var encoded = await storage.read(key: storageKey);
-    _ensureUnlocked();
+    _ensureCurrentSession(requestSession);
     if (encoded == null) {
       encoded = base64Encode(VaultCryptoService.randomBytes(32));
       await storage.write(key: storageKey, value: encoded);
-      _ensureUnlocked();
+      _ensureCurrentSession(requestSession);
     }
     return base64Decode(encoded);
   }
 
-  Future<List<Map<String, dynamic>>> listVaults() async {
+  Future<List<Map<String, dynamic>>> revalidateSession() async {
     final data = await _request('GET', '/vaults', signed: true);
     return (data['items'] as List)
         .map((item) => Map<String, dynamic>.from(item as Map))
         .toList();
+  }
+
+  Future<List<Map<String, dynamic>>> listVaults() => revalidateSession();
+
+  Future<void> revokeSession() async {
+    if (_token == null) {
+      logout();
+      return;
+    }
+    try {
+      await _request(
+        'DELETE',
+        vaultSessionPath,
+        signed: true,
+        expectJson: false,
+      );
+    } finally {
+      logout();
+    }
   }
 
   Future<Map<String, dynamic>> getVault(String id) =>
@@ -242,8 +291,9 @@ class VaultApiService {
 
   Future<Map<String, dynamic>?> pendingCreation() async {
     _ensureUnlocked();
-    final encoded = await storage.read(key: 'cu06_pending_$_userId');
-    _ensureUnlocked();
+    final requestSession = _sessionGeneration;
+    final encoded = await storage.read(key: 'cu06_pending_${_requireUserId()}');
+    _ensureCurrentSession(requestSession);
     return encoded == null
         ? null
         : Map<String, dynamic>.from(jsonDecode(encoded) as Map);
@@ -251,25 +301,102 @@ class VaultApiService {
 
   Future<void> savePending(Map<String, dynamic> body, String retryKey) async {
     _ensureUnlocked();
+    final requestSession = _sessionGeneration;
     await storage.write(
-      key: 'cu06_pending_$_userId',
+      key: 'cu06_pending_${_requireUserId()}',
       value: jsonEncode({'body': body, 'retry_key': retryKey}),
     );
-    _ensureUnlocked();
+    _ensureCurrentSession(requestSession);
   }
 
   Future<void> clearPending() async {
     _ensureUnlocked();
-    await storage.delete(key: 'cu06_pending_$_userId');
-    _ensureUnlocked();
+    final requestSession = _sessionGeneration;
+    await storage.delete(key: 'cu06_pending_${_requireUserId()}');
+    _ensureCurrentSession(requestSession);
   }
 
   void logout() {
+    _clearSession();
+  }
+
+  String _requireUserId() {
+    final userId = _userId;
+    if (userId == null) {
+      throw VaultApiException('Inicia sesión nuevamente.');
+    }
+    return userId;
+  }
+
+  void _ensureCurrentSession(int requestSession) {
+    _ensureUnlocked();
+    if (requestSession != _sessionGeneration) {
+      throw VaultApiException(
+        'La sesión de bóveda cambió antes de completar la operación.',
+      );
+    }
+  }
+
+  Future<void> _invalidateRemoteSession(int requestSession) async {
+    if (requestSession != _sessionGeneration) {
+      return;
+    }
+    final data = _VaultSessionData(
+      accountScope: _accountScope,
+      userId: _userId,
+    );
+    _clearSession();
+    _lockService?.lock();
+    await _deleteVaultData(data);
+  }
+
+  Future<void> _deleteVaultData(_VaultSessionData data) async {
+    final deletions = <Future<void>>[];
+    if (data.accountScope != null) {
+      deletions.add(storage.delete(key: 'cu06_signing_${data.accountScope}'));
+    }
+    if (data.userId != null) {
+      deletions.add(storage.delete(key: 'cu06_wrapping_${data.userId}'));
+      deletions.add(storage.delete(key: 'cu06_pending_${data.userId}'));
+    }
+    try {
+      await Future.wait(deletions);
+    } catch (_) {
+      // The application remains locked even if secure storage cannot be cleared.
+    }
+  }
+
+  void _clearSession() {
+    _sessionGeneration++;
     _token = null;
     _deviceId = null;
     _userId = null;
+    _accountScope = null;
     _signingKey?.destroy();
     _signingKey = null;
+  }
+
+  String? _responseDetail(String body) {
+    try {
+      final data = jsonDecode(body);
+      return data is Map && data['detail'] is String
+          ? data['detail'] as String
+          : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> _decodeResponse(http.Response response) {
+    try {
+      final data = jsonDecode(response.body);
+      if (data is! Map) {
+        throw const FormatException();
+      }
+      return Map<String, dynamic>.from(data);
+    } catch (_) {
+      throw VaultApiException('El backend devolvió una respuesta inválida.');
+    }
   }
 
   bool get _allowsSensitiveActions =>
@@ -282,4 +409,14 @@ class VaultApiService {
       );
     }
   }
+}
+
+class _VaultSessionData {
+  const _VaultSessionData({
+    required this.accountScope,
+    required this.userId,
+  });
+
+  final String? accountScope;
+  final String? userId;
 }

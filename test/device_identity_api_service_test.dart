@@ -14,7 +14,7 @@ void main() {
     final gateway = FakeLocalAuthenticationGateway();
     final lock = AppLockService(authenticator: gateway);
     addTearDown(lock.dispose);
-    await lock.unlock();
+    await unlockAppLock(lock);
     final identity = FakeInstallationIdentityProvider();
     final service = DeviceIdentityApiService(
       identity: identity,
@@ -43,7 +43,7 @@ void main() {
     final gateway = FakeLocalAuthenticationGateway();
     final lock = AppLockService(authenticator: gateway);
     addTearDown(lock.dispose);
-    await lock.unlock();
+    await unlockAppLock(lock);
     final identity = FakeInstallationIdentityProvider();
     final requests = <http.Request>[];
     final client = MockClient((request) async {
@@ -95,7 +95,7 @@ void main() {
     final gateway = FakeLocalAuthenticationGateway();
     final lock = AppLockService(authenticator: gateway);
     addTearDown(lock.dispose);
-    await lock.unlock();
+    await unlockAppLock(lock);
     final identity = FakeInstallationIdentityProvider();
     final requests = <http.Request>[];
     final client = MockClient((request) async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:boveda_mobile/main.dart';
 import 'package:boveda_mobile/services/app_lock_service.dart';
 import 'package:boveda_mobile/services/installation_identity_service.dart';
@@ -18,7 +20,6 @@ void main() {
       (tester) async {
     final lock = AppLockService(
       authenticator: FakeLocalAuthenticationGateway(),
-      backgroundTimeout: Duration.zero,
     );
     addTearDown(lock.dispose);
     await tester.pumpWidget(
@@ -63,7 +64,62 @@ void main() {
     expect(find.text('Identidad privada dañada.'), findsOneWidget);
     expect(find.text('Restablecer identidad local'), findsOneWidget);
     expect(gateway.authenticationCalls, 1);
-    expect(identity.wasLockedOnLoad, isFalse);
+    expect(identity.wasLockedOnLoad, isTrue);
     expect(lock.isLocked, isTrue);
+  });
+
+  testWidgets('keeps the app covered until local identity verification ends',
+      (tester) async {
+    final lock = AppLockService(
+      authenticator: FakeLocalAuthenticationGateway(),
+    );
+    final identity = FakeInstallationIdentityProvider()
+      ..loadCompleter = Completer<InstallationIdentity>();
+    addTearDown(lock.dispose);
+    await tester.pumpWidget(
+      BovedaApp(lockService: lock, identityService: identity),
+    );
+
+    await tester.tap(find.text('Desbloquear'));
+    await tester.pump();
+
+    expect(identity.loadCalls, 1);
+    expect(lock.isLocked, isTrue);
+    expect(find.text('Aplicación bloqueada'), findsOneWidget);
+
+    identity.loadCompleter!.complete(identity.identity);
+    await tester.pump();
+    await tester.pump();
+
+    expect(lock.isLocked, isFalse);
+    expect(find.text('Aplicación bloqueada'), findsNothing);
+  });
+
+  testWidgets('does not unlock when lifecycle changes during verification',
+      (tester) async {
+    final lock = AppLockService(
+      authenticator: FakeLocalAuthenticationGateway(),
+    );
+    final identity = FakeInstallationIdentityProvider()
+      ..loadCompleter = Completer<InstallationIdentity>();
+    addTearDown(lock.dispose);
+    await tester.pumpWidget(
+      BovedaApp(lockService: lock, identityService: identity),
+    );
+
+    await tester.tap(find.text('Desbloquear'));
+    await tester.pump();
+    expect(identity.loadCalls, 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    identity.loadCompleter!.complete(identity.identity);
+    await tester.pumpAndSettle();
+
+    expect(lock.isLocked, isTrue);
+    expect(lock.allowsSensitiveActions, isFalse);
+    expect(find.text('Aplicación bloqueada'), findsOneWidget);
   });
 }

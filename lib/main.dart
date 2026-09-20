@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'config/app_config.dart';
 import 'screens/home_screen.dart';
 import 'services/app_lock_service.dart';
 import 'services/installation_identity_service.dart';
@@ -28,92 +27,110 @@ class _BovedaAppState extends State<BovedaApp> {
   late final AppLockService _lockService;
   late final InstallationIdentityProvider _identityService;
   late final bool _ownsLockService;
+  late int _knownSecurityEpoch;
   bool _identityBusy = false;
   String? _identityError;
+  int _unlockOperation = 0;
 
   @override
   void initState() {
     super.initState();
     _ownsLockService = widget.lockService == null;
-    _lockService = widget.lockService ??
-        AppLockService(backgroundTimeout: AppConfig.backgroundLockTimeout);
+    _lockService = widget.lockService ?? AppLockService();
     _identityService = widget.identityService ?? InstallationIdentityService();
+    _knownSecurityEpoch = _lockService.securityEpoch;
+    _lockService.addListener(_onLockChanged);
     _lockService.start();
   }
 
   @override
   void dispose() {
+    _lockService.removeListener(_onLockChanged);
     if (_ownsLockService) {
       _lockService.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _unlock() async {
+  void _onLockChanged() {
+    final securityEpoch = _lockService.securityEpoch;
+    if (securityEpoch == _knownSecurityEpoch) {
+      return;
+    }
+    _knownSecurityEpoch = securityEpoch;
+    _unlockOperation++;
+    if (mounted && _identityBusy) {
+      setState(() => _identityBusy = false);
+    }
+  }
+
+  bool _isCurrentUnlock(int operation) =>
+      mounted && operation == _unlockOperation;
+
+  Future<void> _unlock() => _authenticateAndVerify(
+        _identityService.loadOrCreate,
+        'No se pudo verificar la identidad criptográfica local.',
+      );
+
+  Future<void> _recoverIdentity() => _authenticateAndVerify(
+        _identityService.recover,
+        'No se pudo restablecer la identidad criptográfica local.',
+      );
+
+  Future<void> _authenticateAndVerify(
+    Future<InstallationIdentity> Function() identityOperation,
+    String unexpectedError,
+  ) async {
     if (_identityBusy || !mounted) {
       return;
     }
+    final operation = ++_unlockOperation;
     setState(() {
       _identityBusy = true;
       _identityError = null;
     });
+
+    AppLockAuthentication? authentication;
     try {
-      final unlocked = await _lockService.unlock();
-      if (!unlocked || !_lockService.allowsSensitiveActions) {
+      authentication = await _lockService.authenticate();
+      if (authentication == null || !_isCurrentUnlock(operation)) {
         return;
       }
-      await _identityService.loadOrCreate();
-      if (!mounted) {
+      await identityOperation();
+      if (!_isCurrentUnlock(operation) ||
+          !_lockService.completeUnlock(authentication)) {
         return;
+      }
+      if (mounted) {
+        setState(() => _identityError = null);
       }
     } on InstallationIdentityException catch (error) {
-      _lockService.lock();
-      if (mounted) {
-        setState(() => _identityError = error.message);
+      if (authentication != null &&
+          _isCurrentUnlock(operation) &&
+          _lockService.isAuthenticationValid(authentication)) {
+        _failUnlock(operation, error.message);
       }
     } catch (_) {
-      _lockService.lock();
-      if (mounted) {
-        setState(() => _identityError =
-            'No se pudo verificar la identidad criptográfica local.');
+      if (authentication != null &&
+          _isCurrentUnlock(operation) &&
+          _lockService.isAuthenticationValid(authentication)) {
+        _failUnlock(operation, unexpectedError);
       }
     } finally {
-      if (mounted) {
+      if (_isCurrentUnlock(operation)) {
         setState(() => _identityBusy = false);
       }
     }
   }
 
-  Future<void> _recoverIdentity() async {
-    if (_identityBusy || !mounted) {
+  void _failUnlock(int operation, String message) {
+    if (!_isCurrentUnlock(operation)) {
       return;
     }
-    setState(() => _identityBusy = true);
-    try {
-      final unlocked = await _lockService.unlock();
-      if (!unlocked || !_lockService.allowsSensitiveActions) {
-        return;
-      }
-      await _identityService.recover();
-      if (mounted) {
-        setState(() => _identityError = null);
-      }
-    } on InstallationIdentityException catch (error) {
-      _lockService.lock();
-      if (mounted) {
-        setState(() => _identityError = error.message);
-      }
-    } catch (_) {
-      _lockService.lock();
-      if (mounted) {
-        setState(() => _identityError =
-            'No se pudo restablecer la identidad criptográfica local.');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _identityBusy = false);
-      }
+    if (mounted) {
+      setState(() => _identityError = message);
     }
+    _lockService.lock();
   }
 
   @override
@@ -138,7 +155,7 @@ class _BovedaAppState extends State<BovedaApp> {
           identityError: _identityError,
           child: child ?? const SizedBox.shrink(),
         ),
-        home: const HomeScreen(),
+        home: HomeScreen(installationIdentity: _identityService),
       ),
     );
   }

@@ -8,9 +8,10 @@ import 'app_lock_service.dart';
 import 'installation_identity_service.dart';
 
 class DeviceIdentityApiException implements Exception {
-  DeviceIdentityApiException(this.message);
+  DeviceIdentityApiException(this.message, {this.statusCode});
 
   final String message;
+  final int? statusCode;
 
   @override
   String toString() => message;
@@ -207,16 +208,15 @@ class DeviceIdentityApiService {
           )
           .timeout(const Duration(seconds: 20));
       _ensureUnlocked();
-      final decoded = _decode(response);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        final detail = decoded['detail'];
+        final detail = _responseDetail(response.body);
         throw DeviceIdentityApiException(
-          detail is String
-              ? detail
-              : 'El backend rechazó el enrolamiento (${response.statusCode}).',
+          detail ??
+              'El backend rechazó el enrolamiento (${response.statusCode}).',
+          statusCode: response.statusCode,
         );
       }
-      return decoded;
+      return _decode(response);
     } on DeviceIdentityApiException {
       rethrow;
     } catch (_) {
@@ -240,6 +240,17 @@ class DeviceIdentityApiService {
     } catch (_) {
       throw DeviceIdentityApiException(
           'El backend devolvió una respuesta inválida.');
+    }
+  }
+
+  String? _responseDetail(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      return decoded is Map && decoded['detail'] is String
+          ? decoded['detail'] as String
+          : null;
+    } catch (_) {
+      return null;
     }
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:boveda_mobile/services/app_lock_service.dart';
 import 'package:boveda_mobile/services/installation_identity_service.dart';
 
@@ -7,6 +9,8 @@ class FakeLocalAuthenticationGateway implements LocalAuthenticationGateway {
   int authenticationCalls = 0;
   bool? biometricOnly;
   bool? persistAcrossBackgrounding;
+  Object? authenticationError;
+  Completer<bool>? authenticationCompleter;
 
   FakeLocalAuthenticationGateway({
     this.supported = true,
@@ -22,6 +26,14 @@ class FakeLocalAuthenticationGateway implements LocalAuthenticationGateway {
     authenticationCalls++;
     this.biometricOnly = biometricOnly;
     this.persistAcrossBackgrounding = persistAcrossBackgrounding;
+    final error = authenticationError;
+    if (error != null) {
+      throw error;
+    }
+    final completer = authenticationCompleter;
+    if (completer != null) {
+      return completer.future;
+    }
     return authenticationResult;
   }
 
@@ -43,6 +55,7 @@ class FakeInstallationIdentityProvider implements InstallationIdentityProvider {
   bool? wasLockedOnLoad;
   int loadCalls = 0;
   int recoverCalls = 0;
+  Completer<InstallationIdentity>? loadCompleter;
   Map<String, Object?>? signedChallenge;
   final signedChallenges = <Map<String, Object?>>[];
 
@@ -53,6 +66,10 @@ class FakeInstallationIdentityProvider implements InstallationIdentityProvider {
     final error = loadError;
     if (error != null) {
       throw error;
+    }
+    final completer = loadCompleter;
+    if (completer != null) {
+      return completer.future;
     }
     return identity;
   }
@@ -83,5 +100,12 @@ class FakeInstallationIdentityProvider implements InstallationIdentityProvider {
     };
     signedChallenges.add(signedChallenge!);
     return 'test-signature';
+  }
+}
+
+Future<void> unlockAppLock(AppLockService lock) async {
+  final authentication = await lock.authenticate();
+  if (authentication == null || !lock.completeUnlock(authentication)) {
+    throw StateError('No se pudo desbloquear el bloqueo de prueba.');
   }
 }
