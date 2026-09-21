@@ -41,11 +41,13 @@ class VaultApiService {
       {Map<String, dynamic>? body,
       String? token,
       String? retryKey,
-      bool signed = false}) async {
+      bool signed = false,
+      String? deviceHeader}) async {
     final uri = Uri.parse('$baseUrl$path');
     final text = body == null ? '' : jsonEncode(body);
     final headers = <String, String>{'Content-Type': 'application/json'};
     if (token != null) headers['Authorization'] = 'Bearer $token';
+    if (deviceHeader != null) headers['X-Device-Id'] = deviceHeader;
     if (retryKey != null) headers['Idempotency-Key'] = retryKey;
     if (signed) {
       if (_token == null || _signingKey == null) {
@@ -139,12 +141,53 @@ class VaultApiService {
       'dispositivo': device,
       'confiar_dispositivo': true
     });
-    final session = await _request('POST', '/vaults/session',
-        token: auth['access_token'] as String,
+    final authToken = auth['access_token'] as String;
+    final devices = await _request('GET', '/devices',
+        token: authToken, deviceHeader: identifier);
+    final currentDevice = (devices['dispositivos'] as List)
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .firstWhere((item) => item['es_dispositivo_actual'] == true);
+
+    Future<Map<String, dynamic>> signChallenge(String purpose) async {
+      final issued = await _request('POST', '/devices/challenge',
+          token: authToken,
+          deviceHeader: identifier,
+          body: {'proposito': purpose});
+      final expires = DateTime.parse(issued['fecha_expiracion'] as String)
+              .toUtc()
+              .millisecondsSinceEpoch ~/
+          1000;
+      final transcript = [
+        'boveda-device-challenge-v1',
+        issued['id_desafio'],
+        purpose,
+        currentDevice['id_usuario'],
+        currentDevice['id_dispositivo'],
+        issued['nonce'],
+        expires.toString(),
+      ].join('\n');
+      final signature =
+          await Ed25519().sign(utf8.encode(transcript), keyPair: signingKey);
+      return {...issued, 'firma': base64Encode(signature.bytes)};
+    }
+
+    final enrollment = await signChallenge('DEVICE_ENROLLMENT');
+    await _request('POST', '/devices/challenge/prove',
+        token: authToken,
+        deviceHeader: identifier,
         body: {
-          'refresh_token': auth['refresh_token'],
-          'code': code.trim(),
-          'public_key': publicKey
+          'id_desafio': enrollment['id_desafio'],
+          'nonce': enrollment['nonce'],
+          'firma': enrollment['firma'],
+        });
+    final challenge = await signChallenge('VAULT_SESSION');
+    final session = await _request('POST', '/vaults/session',
+        token: authToken,
+        deviceHeader: identifier,
+        body: {
+          'id_desafio': challenge['id_desafio'],
+          'nonce': challenge['nonce'],
+          'firma': challenge['firma'],
         });
     _token = session['access_token'] as String;
     _deviceId = session['id_dispositivo'] as String;
@@ -171,9 +214,38 @@ class VaultApiService {
 
   Future<Map<String, dynamic>> getVault(String id) =>
       _request('GET', '/vaults/$id', signed: true);
+
+  Future<Map<String, dynamic>> createEmergencyKit(
+          String vaultId, Map<String, dynamic> body) =>
+      _request('POST', '/vaults/$vaultId/emergency-kit', body: body, signed: true);
+
+  Future<Map<String, dynamic>> recoverEmergencyKit(
+          String vaultId, Map<String, dynamic> body) =>
+      _request('POST', '/vaults/$vaultId/emergency-kit/recover', body: body, signed: true);
+
+  Future<Map<String, dynamic>> revokeEmergencyKit(String vaultId) =>
+      _request('POST', '/vaults/$vaultId/emergency-kit/revoke', signed: true);
+
+  Future<Map<String, dynamic>> listVaultFiles(String id,
+          {int page = 1, int pageSize = 25}) =>
+      _request('GET', '/vaults/$id/files?page=$page&page_size=$pageSize',
+          signed: true);
+
+  Future<Map<String, dynamic>> downloadFile(String vaultId, String versionId) =>
+      _request('GET', '/vaults/$vaultId/files/$versionId/download', signed: true);
+
+  Future<Map<String, dynamic>> deleteFile(
+          String vaultId, String fileId, String retryKey) =>
+      _request('DELETE', '/vaults/$vaultId/files/$fileId',
+          body: const {}, retryKey: retryKey, signed: true);
   Future<Map<String, dynamic>> createVault(
           Map<String, dynamic> body, String retryKey) =>
       _request('POST', '/vaults', body: body, retryKey: retryKey, signed: true);
+
+  Future<Map<String, dynamic>> uploadEncryptedFile(
+      String vaultId, Map<String, dynamic> body, String retryKey) =>
+      _request('POST', '/vaults/$vaultId/files',
+          body: body, retryKey: retryKey, signed: true);
 
   Future<Map<String, dynamic>?> pendingCreation() async {
     final encoded = await storage.read(key: 'cu06_pending_$_userId');
