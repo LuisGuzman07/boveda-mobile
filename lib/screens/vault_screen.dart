@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../services/vault_api_service.dart';
 import '../services/vault_crypto_service.dart';
@@ -22,6 +23,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   bool _busy = false;
   String? _error;
   List<Map<String, dynamic>> _vaults = [];
+  final Map<String, List<Map<String, dynamic>>> _filesByVault = {};
   Map<String, dynamic>? _pending;
   String? _retryKey;
 
@@ -36,6 +38,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _clearPasswords();
+      _crypto.clearSessionKey();
     }
   }
 
@@ -50,6 +53,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _api.logout();
+    _crypto.clearSessionKey();
     for (final controller in [
       _email,
       _accountPassword,
@@ -72,6 +76,7 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     try {
       await action();
     } catch (error) {
+      _crypto.clearSessionKey();
       if (mounted) {
         setState(() => _error = error is VaultApiException
             ? error.message
@@ -96,7 +101,8 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
               ? null
               : Map<String, dynamic>.from(pending['body'] as Map);
           _retryKey = pending?['retry_key'] as String?;
-          _vaults = await _api.listVaults();
+           _vaults = await _api.listVaults();
+           await _loadFileMetadata();
         } finally {
           _accountPassword.clear();
           _totp.clear();
@@ -138,12 +144,63 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
         _name.clear();
         _description.clear();
         _vaults = await _api.listVaults();
+        await _loadFileMetadata();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text(
                   'Bóveda creada. Conserva tu contraseña maestra y este dispositivo.')));
         }
       });
+
+  Future<void> _loadFileMetadata() async {
+    _filesByVault.clear();
+    for (final vault in _vaults) {
+      final id = vault['id_boveda'] as String;
+      final data = await _api.listVaultFiles(id);
+      _filesByVault[id] = (data['items'] as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    }
+  }
+
+  Future<void> _download(String vaultId, Map<String, dynamic> file) =>
+      _run(() async {
+        final response = await _api.downloadFile(
+            vaultId, file['id_version_archivo'] as String);
+        final plaintext = await _crypto.decryptDownloadedFile(response, vaultId);
+        try {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(
+                    'Archivo verificado y descifrado localmente (${plaintext.length} bytes).')));
+          }
+        } finally {
+          plaintext.fillRange(0, plaintext.length, 0);
+        }
+      });
+
+  Future<void> _deleteFile(String vaultId, Map<String, dynamic> file) async {
+    final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+                title: const Text('Eliminar archivo cifrado'),
+                content: const Text(
+                    'El archivo dejará de estar disponible. Las copias cifradas quedarán en retención para preservar la auditoría.'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(dialogContext, false),
+                      child: const Text('Cancelar')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(dialogContext, true),
+                      child: const Text('Eliminar')),
+                ]));
+    if (accepted != true || !mounted) return;
+    await _run(() async {
+      await _api.deleteFile(
+          vaultId, file['id_archivo'] as String, VaultCryptoService.newId());
+      await _loadFileMetadata();
+    });
+  }
 
   Future<void> _reopen(String id) async {
     final password = TextEditingController();
@@ -198,6 +255,67 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
     password.dispose();
   }
 
+  Future<void> _emergencyKit(String id) async {
+    final password = TextEditingController();
+    final kitJson = TextEditingController();
+    final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+                title: const Text('Emergency Kit'),
+                content: SingleChildScrollView(child: Column(children: [
+                  TextField(controller: password, obscureText: true,
+                      decoration: const InputDecoration(labelText: 'Contraseña del kit (12+ caracteres)')),
+                  TextField(controller: kitJson, maxLines: 5,
+                      decoration: const InputDecoration(labelText: 'JSON del kit para importar (opcional)')),
+                ])),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancelar')),
+                  FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Continuar'))
+                ]));
+    if (accepted != true || !mounted) {
+      password.dispose();
+      kitJson.dispose();
+      return;
+    }
+    await _run(() async {
+      if (password.text.length < 12) throw const FormatException('La contraseña del kit debe tener al menos 12 caracteres.');
+      final deviceKey = await _api.deviceKey();
+      try {
+        if (kitJson.text.trim().isEmpty) {
+          if (id.isEmpty) throw const FormatException('Selecciona una bóveda para crear un kit.');
+          final vault = await _api.getVault(id);
+          final kit = await _crypto.createEmergencyKit(id, vault['kdf_salt'] as String, password.text);
+          await _api.createEmergencyKit(id, kit);
+          if (mounted) {
+            await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+              title: const Text('Kit creado'),
+              content: SelectableText(jsonEncode(kit)),
+              actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cerrar'))],
+            ));
+          }
+        } else {
+          final kit = Map<String, dynamic>.from(jsonDecode(kitJson.text) as Map);
+          final targetId = id.isEmpty ? kit['id_boveda'] as String : id;
+          if (kit['id_boveda'] != targetId) throw const FormatException('El kit no corresponde a esta bóveda.');
+          final vault = <String, dynamic>{
+            'id_boveda': targetId,
+            'kdf_salt': kit['kdf_salt_boveda'],
+          };
+          final payload = await _crypto.prepareEmergencyRecovery(kit, vault, password.text, _api.deviceId, deviceKey);
+          await _api.recoverEmergencyKit(targetId, payload);
+          final recoveredVault = await _api.getVault(targetId);
+          await _crypto.reopen(recoveredVault, password.text, deviceKey);
+        }
+      } finally {
+        deviceKey.fillRange(0, deviceKey.length, 0);
+        password.clear();
+        kitJson.clear();
+      }
+    });
+    password.dispose();
+    kitJson.dispose();
+  }
+
   Widget _field(TextEditingController controller, String label,
           {bool secret = false, int? maxLength, bool enabled = true}) =>
       Padding(
@@ -223,7 +341,9 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                     ? null
                     : () => setState(() {
                           _api.logout();
-                          _vaults = [];
+                          _crypto.clearSessionKey();
+                           _vaults = [];
+                           _filesByVault.clear();
                           _pending = null;
                           _retryKey = null;
                           _clearPasswords();
@@ -252,8 +372,13 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
             const Text('Crear una bóveda vacía',
                 style: TextStyle(fontSize: 22)),
             const SizedBox(height: 12),
-            const Text(
-                'La contraseña maestra es independiente de tu cuenta. Perder este dispositivo o sus claves puede impedir abrir la bóveda; Emergency Kit aún no está disponible.'),
+           const Text(
+                 'La contraseña maestra es independiente de tu cuenta. Emergency Kit permite recuperar la bóveda localmente en otro dispositivo confiable.'),
+             const SizedBox(height: 8),
+             OutlinedButton.icon(
+                 onPressed: _busy ? null : () => _emergencyKit(''),
+                 icon: const Icon(Icons.upload_file),
+                 label: const Text('Importar Emergency Kit en este dispositivo')),
             const SizedBox(height: 16),
             _field(_name, 'Nombre', maxLength: 150, enabled: _pending == null),
             _field(_description, 'Descripción opcional',
@@ -287,22 +412,52 @@ class _VaultScreenState extends State<VaultScreen> with WidgetsBindingObserver {
                   onPressed: _busy
                       ? null
                       : () => _run(() async {
-                            _vaults = await _api.listVaults();
+                             _vaults = await _api.listVaults();
+                             await _loadFileMetadata();
                           }),
                   icon: const Icon(Icons.refresh))
             ]),
             if (_vaults.isEmpty)
               const Text(
                   'Todavía no hay bóvedas disponibles para este dispositivo.'),
-            ..._vaults.map((vault) => ListTile(
-                leading: const Icon(Icons.lock),
-                title: Text(
-                    'Bóveda ${vault['id_boveda'].toString().substring(0, 8)}'),
-                subtitle: const Text('Nombre protegido · propietario'),
-                trailing: const Icon(Icons.verified_user),
-                onTap: _busy
-                    ? null
-                    : () => _reopen(vault['id_boveda'] as String))),
+            ..._vaults.map((vault) {
+              final id = vault['id_boveda'] as String;
+              final files = _filesByVault[id] ?? const [];
+              return ExpansionTile(
+                  leading: const Icon(Icons.lock),
+                  title: Text('Bóveda ${id.substring(0, 8)}'),
+                  subtitle: Text('Nombre protegido · ${files.length} versiones'),
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      IconButton(
+                          tooltip: 'Emergency Kit',
+                          onPressed: _busy ? null : () => _emergencyKit(id),
+                          icon: const Icon(Icons.emergency)),
+                      IconButton(
+                          tooltip: 'Verificar bóveda',
+                          onPressed: _busy ? null : () => _reopen(id),
+                          icon: const Icon(Icons.verified_user)),
+                    ]),
+                       children: files
+                      .map((file) => ListTile(
+                            dense: true,
+                            title: Text(
+                                'Archivo ${file['id_archivo'].toString().substring(0, 8)} · v${file['numero_version']}'),
+                            subtitle: Text(
+                                '${file['tamano_cifrado']} bytes · ${file['estado_replica'] ?? 'Sin réplica'}'),
+                             leading: const Icon(Icons.description_outlined),
+                              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                                IconButton(
+                                    tooltip: 'Verificar y descifrar localmente',
+                                    onPressed: _busy ? null : () => _download(id, file),
+                                    icon: const Icon(Icons.download)),
+                                IconButton(
+                                    tooltip: 'Eliminar archivo',
+                                    onPressed: _busy ? null : () => _deleteFile(id, file),
+                                    icon: const Icon(Icons.delete_outline)),
+                              ]),
+                           ))
+                      .toList());
+            }),
           ],
         ]));
   }
