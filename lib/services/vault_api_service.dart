@@ -31,8 +31,8 @@ class VaultApiService {
             (configuredUrl.isNotEmpty
                 ? configuredUrl
                 : (!kIsWeb && Platform.isAndroid
-                    ? 'http://10.0.2.2:8001/api/v1'
-                    : 'http://localhost:8001/api/v1'));
+                    ? 'http://localhost:8000/api/v1'
+                    : 'http://localhost:8000/api/v1'));
 
   bool get authenticated => _token != null;
   String get deviceId => _deviceId!;
